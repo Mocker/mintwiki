@@ -17,6 +17,7 @@
 //	mintwiki proposals --data DIR
 //	mintwiki accept --data DIR --proposal ID
 //	mintwiki verify-receipts --data DIR
+//	mintwiki tools
 package main
 
 import (
@@ -35,6 +36,7 @@ import (
 	"github.com/Mocker/mintwiki/internal/site"
 	"github.com/Mocker/mintwiki/internal/store"
 	"github.com/Mocker/mintwiki/internal/token"
+	"github.com/Mocker/mintwiki/internal/tools"
 	"github.com/Mocker/mintwiki/internal/web"
 )
 
@@ -408,6 +410,17 @@ func cmdDecideRequest(args []string, approve bool) {
 	fmt.Printf("%s %s (service %s, scope %s:%s)\n", result, m.ID, m.Service, m.Tool, strings.Join(m.Paths, ","))
 }
 
+// cmdTools prints the shared tool definitions as JSON — the same
+// definitions the MCP server lists and webmcp.js registers. No data
+// directory needed: the definitions are static.
+func cmdTools(args []string) {
+	b, err := tools.DefinitionJSON()
+	if err != nil {
+		fatal(err)
+	}
+	fmt.Println(string(b))
+}
+
 func cmdVerifyReceipts(args []string) {
 	fs := flag.NewFlagSet("verify-receipts", flag.ExitOnError)
 	data := dataFlag(fs)
@@ -421,7 +434,7 @@ func cmdVerifyReceipts(args []string) {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: mintwiki <init|serve|build|mint|revoke|service|mint-requests|approve-request|deny-request|proposals|accept|verify-receipts> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: mintwiki <init|serve|build|mint|revoke|service|mint-requests|approve-request|deny-request|proposals|accept|verify-receipts|tools> [flags]")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -449,6 +462,8 @@ func main() {
 		cmdAccept(os.Args[2:])
 	case "verify-receipts":
 		cmdVerifyReceipts(os.Args[2:])
+	case "tools":
+		cmdTools(os.Args[2:])
 	default:
 		fmt.Fprintln(os.Stderr, "unknown command:", os.Args[1])
 		os.Exit(2)

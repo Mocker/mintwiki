@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# MintWiki Milestone 1 acceptance demo: the 7 steps from the build spec,
-# run against a fresh binary and an empty data directory.
+# MintWiki acceptance demo: Milestone 1 steps 1–6 + token exchange and
+# approval queue (6b/6c), Milestone 2 agent surfaces (step 7), and the
+# receipts/portability check (step 8). Fresh binary, empty data directory.
 set -u
 cd "$(dirname "$0")/.."
 
@@ -121,7 +122,63 @@ REQID2=$(echo "$body" | json_get request_id)
 resp=$(poll "$SVC_CRED" "$REQID2"); body=$(echo "$resp" | head -n -1)
 [ "$(echo "$body" | json_get status)" = "denied" ] && [ -z "$(echo "$body" | json_get token)" ] && echo "PASS: denied request yields no token" && PASS=$((PASS+1)) || { echo "FAIL: denied poll: $body"; FAIL=$((FAIL+1)); }
 
-echo "== step 7: receipts verify; restart + data-dir copy renders the same page =="
+echo "== step 7: M2 agent surfaces — HTTP MCP tools + WebMCP registration =="
+mcp() { # body [token] -> response body
+  if [ -n "${2:-}" ]; then
+    curl -s -X POST "$BASE/mcp" -H "Authorization: Bearer $2" -H 'Content-Type: application/json' -d "$1"
+  else
+    curl -s -X POST "$BASE/mcp" -H 'Content-Type: application/json' -d "$1"
+  fi
+}
+rpc_call() { # tool args-json [token] -> inner result JSON, or ERROR
+  mcp "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"$1\",\"arguments\":$2}}" "${3:-}" | python3 -c "
+import sys,json
+rpc=json.load(sys.stdin); res=rpc.get('result',{})
+print('ERROR' if res.get('isError') else res['content'][0]['text'])
+"
+}
+list=$(mcp '{"jsonrpc":"2.0","id":1,"method":"tools/list"}')
+names=$(echo "$list" | python3 -c "import sys,json;print(','.join(sorted(t['name'] for t in json.load(sys.stdin)['result']['tools'])))")
+ok "$names" "backlinks,get_page,get_section,propose_edit,recent_changes,search" "MCP tools/list serves the six shared tools"
+init=$(mcp '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}')
+echo "$init" | grep -q '"name":"mintwiki"' && echo "PASS: MCP initialize answers with server info" && PASS=$((PASS+1)) || { echo "FAIL: initialize: $init"; FAIL=$((FAIL+1)); }
+gp=$(rpc_call get_page '{"path":"projects/demo"}')
+echo "$gp" | grep -q "Demo page v2" && echo "PASS: MCP get_page returns the page content" && PASS=$((PASS+1)) || { echo "FAIL: get_page: $gp"; FAIL=$((FAIL+1)); }
+GREV=$(echo "$gp" | json_get revision)
+page=$(curl -s "$BASE/projects/demo")
+echo "$page" | grep -q "$GREV" && echo "PASS: MCP get_page revision matches the rendered page" && PASS=$((PASS+1)) || { echo "FAIL: revision mismatch"; FAIL=$((FAIL+1)); }
+GUIDE=$(printf '# Guide\n\n## Alpha\n\nalpha banana text.\n\n## Beta\n\nbeta text.\n')
+resp=$(edit "$TOK" projects/guide "$GUIDE" 0); code=$(echo "$resp" | tail -1)
+ok "$code" "200" "guide page created for section/backlink checks"
+LINKER=$(printf '# Linker\n\nSee [the guide](/projects/guide).\n')
+resp=$(edit "$TOK" projects/linker "$LINKER" 0); code=$(echo "$resp" | tail -1)
+ok "$code" "200" "linker page created for backlink checks"
+sec=$(rpc_call get_section '{"path":"projects/guide","heading":"Alpha"}')
+echo "$sec" | grep -q "banana" && ! echo "$sec" | grep -q "beta text" && echo "PASS: MCP get_section returns only the named section" && PASS=$((PASS+1)) || { echo "FAIL: get_section: $sec"; FAIL=$((FAIL+1)); }
+srch=$(rpc_call search '{"query":"banana"}')
+echo "$srch" | grep -q "projects/guide" && echo "PASS: MCP search finds pages by body text" && PASS=$((PASS+1)) || { echo "FAIL: search: $srch"; FAIL=$((FAIL+1)); }
+bl=$(rpc_call backlinks '{"path":"projects/guide"}')
+echo "$bl" | grep -q "projects/linker" && echo "PASS: MCP backlinks finds the linking page" && PASS=$((PASS+1)) || { echo "FAIL: backlinks: $bl"; FAIL=$((FAIL+1)); }
+rc=$(rpc_call recent_changes '{"limit":1}')
+echo "$rc" | grep -q '"path":"projects/linker"' && echo "PASS: MCP recent_changes returns the newest revision first" && PASS=$((PASS+1)) || { echo "FAIL: recent_changes: $rc"; FAIL=$((FAIL+1)); }
+np=$(rpc_call propose_edit '{"path":"projects/demo","content":"# nope","expected_version":3}')
+ok "$np" "ERROR" "MCP propose_edit without a token is an error"
+pp=$(rpc_call propose_edit '{"path":"projects/demo","content":"# Demo page v2 (MCP proposed)","expected_version":3}' "$TOK")
+MPROP=$(echo "$pp" | json_get proposal_id)
+[ -n "$MPROP" ] && echo "PASS: MCP propose_edit with an allow token lands a proposal" && PASS=$((PASS+1)) || { echo "FAIL: propose_edit: $pp"; FAIL=$((FAIL+1)); }
+page=$(curl -s "$BASE/projects/demo")
+echo "$page" | grep -q "MCP proposed" && { echo "FAIL: MCP proposal moved the head"; FAIL=$((FAIL+1)); } || { echo "PASS: head unchanged while MCP proposal pending"; PASS=$((PASS+1)); }
+"$BIN" accept --data "$DATA" --proposal "$MPROP" >/dev/null || { echo "FAIL: accept MCP proposal"; FAIL=$((FAIL+1)); }
+page=$(curl -s "$BASE/projects/demo")
+echo "$page" | grep -q "MCP proposed" && echo "PASS: accepted MCP proposal moved the head" && PASS=$((PASS+1)) || { echo "FAIL: accepted MCP content not live"; FAIL=$((FAIL+1)); }
+grep -q "registerTool" "$DATA/site/webmcp.js" && grep -q "propose_edit" "$DATA/site/webmcp.js" && echo "PASS: static build generates webmcp.js from the shared definitions" && PASS=$((PASS+1)) || { echo "FAIL: webmcp.js missing or incomplete"; FAIL=$((FAIL+1)); }
+grep -q "/webmcp.js" "$DATA/site/projects/demo.html" && echo "PASS: built pages load webmcp.js" && PASS=$((PASS+1)) || { echo "FAIL: page does not reference webmcp.js"; FAIL=$((FAIL+1)); }
+code=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/webmcp.js")
+ok "$code" "200" "server serves /webmcp.js"
+code=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/mcp")
+ok "$code" "405" "GET /mcp refused with 405"
+
+echo "== step 8: receipts verify; restart + data-dir copy renders the same page =="
 out=$("$BIN" verify-receipts --data "$DATA")
 echo "$out" | grep -q "receipt chain OK" && echo "PASS: $out" && PASS=$((PASS+1)) || { echo "FAIL: receipts: $out"; FAIL=$((FAIL+1)); }
 kill "$SRV_PID" 2>/dev/null; wait "$SRV_PID" 2>/dev/null; SRV_PID=""

@@ -38,9 +38,32 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /edit", s.handleEdit)
 	mux.HandleFunc("POST /v1/tokens", s.handleMint)
 	mux.HandleFunc("GET /v1/tokens/{id}", s.handleMintPoll)
+	mux.HandleFunc("POST /mcp", s.handleMCP)
+	mux.HandleFunc("GET /mcp", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "MCP endpoint accepts POST only", http.StatusMethodNotAllowed)
+	})
+	mux.HandleFunc("GET /webmcp.js", s.handleWebMCPJS)
 	mux.HandleFunc("GET /{$}", s.handleIndex)
 	mux.HandleFunc("GET /{path...}", s.handlePage)
 	return mux
+}
+
+// handleWebMCPJS serves the generated WebMCP registration script from
+// the built site (rebuilding once if it is missing, like pages).
+func (s *Server) handleWebMCPJS(w http.ResponseWriter, r *http.Request) {
+	file := filepath.Join(s.SiteDir, "webmcp.js")
+	b, err := os.ReadFile(file)
+	if err != nil {
+		s.rebuild()
+		b, err = os.ReadFile(file)
+		if err != nil {
+			http.Error(w, "site not built", http.StatusInternalServerError)
+			return
+		}
+	}
+	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	_, _ = w.Write(b)
 }
 
 // rebuild regenerates the static site from the store. The store is the
@@ -117,6 +140,58 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// verifyEditToken runs the token lane's verification steps shared by
+// /edit and the MCP propose_edit tool, in order: bearer present →
+// signature/expiry → jti minted by this wiki → not revoked → scope
+// covers the target path. On failure it returns the HTTP status the
+// /edit surface would use and a caller-safe reason; claims may be
+// non-nil on failure (for receipting) once parsing succeeded.
+func (s *Server) verifyEditToken(auth, path string) (claims *token.Claims, code int, reason string) {
+	if !strings.HasPrefix(auth, "Bearer ") {
+		return nil, http.StatusUnauthorized, "missing bearer token"
+	}
+	claims, err := token.Parse(s.Key, strings.TrimPrefix(auth, "Bearer "))
+	if err != nil {
+		return nil, http.StatusUnauthorized, "invalid or expired token"
+	}
+	registered, err := s.Store.IsRegistered(claims.ID)
+	if err != nil || !registered {
+		return claims, http.StatusUnauthorized, "token not minted by this wiki"
+	}
+	revoked, err := s.Store.IsRevoked(claims.ID)
+	if err != nil || revoked {
+		return claims, http.StatusUnauthorized, "token revoked"
+	}
+	if claims.Tool != token.ToolEdit || !claims.CoversPath(path) {
+		return claims, http.StatusForbidden, "token scope does not cover this page"
+	}
+	return claims, 0, ""
+}
+
+// proposeWithClaims stores an edit as a proposal under already-verified
+// claims and receipts the outcome (proposed, or rejected on conflict).
+// The head never moves here; the owner accepts proposals separately.
+func (s *Server) proposeWithClaims(claims *token.Claims, path, content string, expectedVersion int64) (propID string, code int, reason string) {
+	before, _ := s.Store.HeadVersion(path)
+	propID, err := s.Store.AddProposal(path, []byte(content), expectedVersion, claims.ID)
+	if errors.Is(err, store.ErrConflict) {
+		reason := "head moved since the edit was based on it"
+		_ = s.Receipts.Append(receipts.Entry{
+			Actor: claims.Actor, TokenJTI: claims.ID, Scope: claims.ScopeString(),
+			Page: path, Result: "rejected", Reason: reason, BeforeVer: before, AfterVer: before,
+		})
+		return "", http.StatusConflict, reason
+	}
+	if err != nil {
+		return "", http.StatusInternalServerError, "store error"
+	}
+	_ = s.Receipts.Append(receipts.Entry{
+		Actor: claims.Actor, TokenJTI: claims.ID, Scope: claims.ScopeString(),
+		Page: path, Result: "proposed", ProposalID: propID, BeforeVer: before, AfterVer: before,
+	})
+	return propID, 0, ""
+}
+
 // handleEdit runs the write lane in the spec's verification order:
 // signature/expiry (token parse) → registered jti → not revoked →
 // scope covers path → tier handling → CAS write → receipt.
@@ -147,52 +222,23 @@ func (s *Server) handleEdit(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, code, editResponse{Error: reason})
 	}
 
-	// 1. Bearer token present, signature + expiry valid.
-	auth := r.Header.Get("Authorization")
-	if !strings.HasPrefix(auth, "Bearer ") {
-		reject(http.StatusUnauthorized, nil, "missing bearer token")
-		return
-	}
-	claims, err := token.Parse(s.Key, strings.TrimPrefix(auth, "Bearer "))
-	if err != nil {
-		reject(http.StatusUnauthorized, nil, "invalid or expired token")
-		return
-	}
-	// 2. The jti must have been minted by this wiki (registered at mint).
-	registered, err := s.Store.IsRegistered(claims.ID)
-	if err != nil || !registered {
-		reject(http.StatusUnauthorized, claims, "token not minted by this wiki")
-		return
-	}
-	// 3. Revocation beats expiry: a revoked token dies now.
-	revoked, err := s.Store.IsRevoked(claims.ID)
-	if err != nil || revoked {
-		reject(http.StatusUnauthorized, claims, "token revoked")
-		return
-	}
-	// 4. Scope: the right tool, covering this path.
-	if claims.Tool != token.ToolEdit || !claims.CoversPath(path) {
-		reject(http.StatusForbidden, claims, "token scope does not cover this page")
+	// 1–4. Bearer token, minted here, not revoked, scope covers path.
+	claims, code, reason := s.verifyEditToken(r.Header.Get("Authorization"), path)
+	if reason != "" {
+		reject(code, claims, reason)
 		return
 	}
 
 	before, _ := s.Store.HeadVersion(path)
 
 	// 5a. approve tier: land as a proposal; the head does not move.
+	// proposeWithClaims receipts its own outcome, so no reject() here.
 	if claims.Tier == token.TierApprove {
-		propID, err := s.Store.AddProposal(path, []byte(req.Content), req.ExpectedVersion, claims.ID)
-		if errors.Is(err, store.ErrConflict) {
-			reject(http.StatusConflict, claims, "head moved since the edit was based on it")
+		propID, pcode, preason := s.proposeWithClaims(claims, path, req.Content, req.ExpectedVersion)
+		if preason != "" {
+			writeJSON(w, pcode, editResponse{Error: preason})
 			return
 		}
-		if err != nil {
-			reject(http.StatusInternalServerError, claims, "store error")
-			return
-		}
-		_ = s.Receipts.Append(receipts.Entry{
-			Actor: claims.Actor, TokenJTI: claims.ID, Scope: claims.ScopeString(),
-			Page: path, Result: "proposed", ProposalID: propID, BeforeVer: before, AfterVer: before,
-		})
 		writeJSON(w, http.StatusAccepted, editResponse{Status: "proposed", ProposalID: propID})
 		return
 	}

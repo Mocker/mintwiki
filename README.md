@@ -2,9 +2,9 @@
 
 A wiki where humans and agents edit under narrow scoped, short-lived tokens — immutable revisions, CAS head pointers, structured agent reads (WebMCP + MCP).
 
-Current wiki software (MediaWiki, Wiki.js, BookStack) trusts standing accounts: an account can edit a page, forever, until someone revokes the account. Agent editors break that model. An agent should hold exactly the permission for *this* edit, on *these* pages, for *minutes* — with a receipt. MintWiki fixes both sides of that: scoped tokens for writes, and structured tool surfaces for reads (WebMCP + HTTP MCP, landing in a later milestone).
+Current wiki software (MediaWiki, Wiki.js, BookStack) trusts standing accounts: an account can edit a page, forever, until someone revokes the account. Agent editors break that model. An agent should hold exactly the permission for *this* edit, on *these* pages, for *minutes* — with a receipt. MintWiki fixes both sides of that: scoped tokens for writes, and structured tool surfaces for reads (WebMCP + HTTP MCP), so agents call tools instead of scraping HTML.
 
-**Status:** Milestone 1 — storage core + scoped-token write lane. Portable by design: a single Go binary, SQLite, one data directory, no cloud-vendor dependencies. Apache-2.0.
+**Status:** Milestone 2 — storage core + scoped-token write lane + agent read surfaces. Portable by design: a single Go binary, SQLite, one data directory, no cloud-vendor dependencies. Apache-2.0.
 
 ## How editing works (no accounts)
 
@@ -69,9 +69,35 @@ Requests *above* a ceiling are not flatly denied — they **escalate to the owne
 
 Backup is copying the data directory. Moving the wiki is copying the data directory.
 
+## Agent reads: one tool set, two surfaces
+
+Six tools are defined **once** in `internal/tools` — name, description, JSON Schema — and both agent surfaces are generated from that single definition set, so they can never drift:
+
+| Tool | What it does |
+|---|---|
+| `get_page` | Page content + the exact revision ID and version it was read at |
+| `get_section` | One Markdown section of a page, by heading |
+| `search` | Case-insensitive substring search across pages, with snippets |
+| `backlinks` | Pages that link to a page (Markdown links and `[[wiki links]]`) |
+| `recent_changes` | Newest revisions across the wiki, newest first |
+| `propose_edit` | Propose an edit — the one write-shaped tool; see below |
+
+**HTTP MCP server** (`POST /mcp`, JSON-RPC 2.0, stateless) for non-browser agents — CLI agents, runtimes like Anna, anything that speaks MCP:
+
+```
+curl -X POST localhost:8090/mcp -d '{"jsonrpc":"2.0","id":1,"method":"tools/call",
+  "params":{"name":"get_page","arguments":{"path":"projects/demo"}}}'
+```
+
+Both the `initialize` handshake and the stateless `server/discover` method are answered, so clients across the MCP spec transition can connect. `mintwiki tools` prints the shared definitions as JSON.
+
+**WebMCP registration** for browser agents: the static build generates `webmcp.js` from the same definitions, and every built page loads it. When a WebMCP host is present (`navigator.modelContext`), the page registers all six tools; their `execute` calls the wiki's own `/mcp` endpoint, so there is exactly one server-side execution path. With no WebMCP host — an ordinary browser — the script does nothing.
+
+Reads are token-free (public-wiki semantics). `propose_edit` is not a back door around the token lane: it requires the same bearer edit token as `POST /edit`, sent as the `/mcp` request's `Authorization` header (WebMCP calls forward one from `localStorage["mintwiki_token"]` when present), runs the identical verification order and CAS check, is receipted like any other write attempt — and always lands as a *proposal*. The head moves only when the owner accepts it, exactly like an `approve`-tier edit.
+
 ## Acceptance demo
 
-`scripts/demo.sh` runs the Milestone 1 acceptance test end-to-end (fresh binary, empty data dir): first edit, stale-writer conflict, out-of-scope rejection, approve-tier propose/accept, revoked token, expired token, receipt-chain verification, and a restart from a copied data directory.
+`scripts/demo.sh` runs the acceptance test end-to-end (fresh binary, empty data dir): first edit, stale-writer conflict, out-of-scope rejection, approve-tier propose/accept, revoked token, expired token, the service token exchange and its approval queue, the MCP tools (list, initialize, get_page/get_section/search/backlinks/recent_changes, propose_edit with and without a token), the WebMCP registration file, receipt-chain verification, and a restart from a copied data directory.
 
 ```
 bash scripts/demo.sh
@@ -80,18 +106,20 @@ bash scripts/demo.sh
 ## Layout
 
 ```
-cmd/mintwiki/     CLI: init | serve | build | mint | revoke | service | mint-requests | approve-request | deny-request | proposals | accept | verify-receipts
+cmd/mintwiki/     CLI: init | serve | build | mint | revoke | service | mint-requests | approve-request | deny-request | proposals | accept | verify-receipts | tools
 internal/store/   content-addressed .md revisions + SQLite manifest & CAS heads + pages/ mirror + service registry
 internal/token/   mint / verify / scope matching (single-purpose HMAC secret)
 internal/policy/  local policy file (TTL caps), checked at request time
 internal/receipts/ append-only hash-chained audit log
-internal/site/    static HTML builder (index + one .html per page)
-internal/web/     static site serving + POST /edit + POST /v1/tokens (the exchange)
+internal/tools/   the shared tool definitions + read implementations (single source for both agent surfaces)
+internal/site/    static HTML builder (index + one .html per page + generated webmcp.js)
+internal/web/     static site serving + POST /edit + POST /v1/tokens (the exchange) + POST /mcp (HTTP MCP server)
 ```
 
 ## Roadmap
 
-- **M2:** agent read surfaces — WebMCP tool registration in the web app and an HTTP MCP server, both generated from one tool definition set (`get_page`, `get_section`, `search`, `backlinks`, `recent_changes`, `propose_edit`).
+- **M2 (done):** agent read surfaces — WebMCP tool registration in the web app and an HTTP MCP server, both generated from one tool definition set (`get_page`, `get_section`, `search`, `backlinks`, `recent_changes`, `propose_edit`).
+- Next: public demo deployment.
 - Later: human edit UI with a propose-and-accept queue, private-wiki read tokens, optional maintenance ("dreaming") modules, S3-compatible revision backend.
 
 ## License

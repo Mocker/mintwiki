@@ -49,3 +49,41 @@ func TestBuildStaticSite(t *testing.T) {
 		t.Fatalf("page .md mirror = %q", md)
 	}
 }
+
+func TestBuildWritesWebMCPRegistration(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, _, _, err := st.PutPage("projects/demo", []byte("# Demo\n"), 0, "owner", "jti-1"); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(t.TempDir(), "site")
+	if _, err := Build(st, out); err != nil {
+		t.Fatal(err)
+	}
+	js, err := os.ReadFile(filepath.Join(out, "webmcp.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"registerTool", "get_page", "get_section", "search", "backlinks", "recent_changes", "propose_edit", "/mcp"} {
+		if !strings.Contains(string(js), want) {
+			t.Fatalf("webmcp.js missing %q", want)
+		}
+	}
+	pageHTML, err := os.ReadFile(filepath.Join(out, "projects", "demo.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(pageHTML), "/webmcp.js") {
+		t.Fatalf("built page does not load webmcp.js: %s", pageHTML)
+	}
+	idx, err := os.ReadFile(filepath.Join(out, "index.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(idx), "/webmcp.js") {
+		t.Fatalf("built index does not load webmcp.js: %s", idx)
+	}
+}

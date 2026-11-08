@@ -613,6 +613,43 @@ func (s *Store) SetMintRequestStatus(id, status string) error {
 	return err
 }
 
+// Revision is one row of the revisions manifest: an immutable revision
+// object plus the metadata recorded when it was written.
+type Revision struct {
+	RevID     string
+	PagePath  string
+	ParentRev string
+	Author    string
+	TokenJTI  string
+	CreatedAt string
+}
+
+// RecentChanges returns the newest revisions across all pages, newest
+// first. Ordering is by creation time with the manifest's row order as
+// the tiebreak (timestamps carry second resolution; rows inserted later
+// are newer). limit <= 0 means the caller's default applies upstream;
+// the store only guards against nonsense values.
+func (s *Store) RecentChanges(limit int) ([]*Revision, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.db.Query(`SELECT rev_id, page_path, parent_rev, author, token_jti, created_at
+		FROM revisions ORDER BY created_at DESC, rowid DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Revision
+	for rows.Next() {
+		r := &Revision{}
+		if err := rows.Scan(&r.RevID, &r.PagePath, &r.ParentRev, &r.Author, &r.TokenJTI, &r.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // NormalizePath cleans a wiki path: no leading slash, no empty segments,
 // no traversal.
 func NormalizePath(p string) (string, error) {
