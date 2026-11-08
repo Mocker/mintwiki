@@ -18,6 +18,7 @@
 //	mintwiki accept --data DIR --proposal ID
 //	mintwiki verify-receipts --data DIR
 //	mintwiki tools
+//	mintwiki seed --data DIR --dir deploy/seed
 package main
 
 import (
@@ -410,6 +411,71 @@ func cmdDecideRequest(args []string, approve bool) {
 	fmt.Printf("%s %s (service %s, scope %s:%s)\n", result, m.ID, m.Service, m.Tool, strings.Join(m.Paths, ","))
 }
 
+// cmdSeed writes starter pages from a directory tree of .md files into
+// the wiki (deploy/seed in the repo is the demo set). The directory
+// layout mirrors wiki paths: deploy/seed/sandbox/welcome.md seeds the
+// page sandbox/welcome. Seeding is an owner bootstrap action, in the
+// same trust class as init and accept: it writes through the store and
+// receipts every page it applies. It is idempotent — a page that
+// already exists is skipped, never overwritten — so it is safe to run
+// on every container start.
+func cmdSeed(args []string) {
+	fs := flag.NewFlagSet("seed", flag.ExitOnError)
+	data := dataFlag(fs)
+	dir := fs.String("dir", "deploy/seed", "directory of .md files mirroring wiki paths")
+	fs.Parse(args)
+	st, rl, _, _, err := openAll(*data)
+	if err != nil {
+		fatal(err)
+	}
+	defer st.Close()
+	seeded, skipped := 0, 0
+	err = filepath.WalkDir(*dir, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(p, ".md") {
+			return nil
+		}
+		rel, err := filepath.Rel(*dir, p)
+		if err != nil {
+			return err
+		}
+		pagePath, err := store.NormalizePath(strings.TrimSuffix(filepath.ToSlash(rel), ".md"))
+		if err != nil {
+			return err
+		}
+		if _, err := st.GetPage(pagePath); err == nil {
+			skipped++
+			return nil
+		}
+		content, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		revID, newVer, _, err := st.PutPage(pagePath, content, 0, "seed", "")
+		if err != nil {
+			return fmt.Errorf("seed %s: %w", pagePath, err)
+		}
+		if err := rl.Append(receipts.Entry{
+			Actor: "seed", Page: pagePath, Result: "applied",
+			RevID: revID, BeforeVer: 0, AfterVer: newVer,
+		}); err != nil {
+			return err
+		}
+		seeded++
+		fmt.Printf("seeded %s (revision %s)\n", pagePath, revID[:12])
+		return nil
+	})
+	if err != nil {
+		fatal(err)
+	}
+	if _, err := site.Build(st, siteDir(*data)); err != nil {
+		fatal(err)
+	}
+	fmt.Printf("seed complete: %d applied, %d already present\n", seeded, skipped)
+}
+
 // cmdTools prints the shared tool definitions as JSON — the same
 // definitions the MCP server lists and webmcp.js registers. No data
 // directory needed: the definitions are static.
@@ -434,7 +500,7 @@ func cmdVerifyReceipts(args []string) {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: mintwiki <init|serve|build|mint|revoke|service|mint-requests|approve-request|deny-request|proposals|accept|verify-receipts|tools> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: mintwiki <init|serve|build|mint|revoke|service|mint-requests|approve-request|deny-request|proposals|accept|verify-receipts|tools|seed> [flags]")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -464,6 +530,8 @@ func main() {
 		cmdVerifyReceipts(os.Args[2:])
 	case "tools":
 		cmdTools(os.Args[2:])
+	case "seed":
+		cmdSeed(os.Args[2:])
 	default:
 		fmt.Fprintln(os.Stderr, "unknown command:", os.Args[1])
 		os.Exit(2)

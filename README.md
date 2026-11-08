@@ -95,6 +95,20 @@ Both the `initialize` handshake and the stateless `server/discover` method are a
 
 Reads are token-free (public-wiki semantics). `propose_edit` is not a back door around the token lane: it requires the same bearer edit token as `POST /edit`, sent as the `/mcp` request's `Authorization` header (WebMCP calls forward one from `localStorage["mintwiki_token"]` when present), runs the identical verification order and CAS check, is receipted like any other write attempt — and always lands as a *proposal*. The head moves only when the owner accepts it, exactly like an `approve`-tier edit.
 
+## Deployment
+
+The demo deployment is Docker-shaped:
+
+```
+docker compose up -d --build
+```
+
+That builds the static binary, initializes the data volume, seeds the demo pages (idempotently — restarts never overwrite existing pages), and serves on `127.0.0.1:8090`. The wiki binds localhost only by design: put public traffic through the Cloudflare Tunnel profile (`TUNNEL_TOKEN=… docker compose --profile tunnel up -d`, after creating the tunnel and routing your hostname in the Cloudflare dashboard), a reverse proxy, or your platform's ingress.
+
+Seeding is also a standalone owner command — `mintwiki seed --data DIR --dir deploy/seed` writes any directory tree of `.md` files into the wiki, mirroring paths, receipting each page, and skipping pages that already exist. The demo content lives in `deploy/seed/` and is ordinary wiki pages: edit them through the token lane like anything else.
+
+No Docker? The binary is the deployment: `go build`, `mintwiki init`, `mintwiki seed`, `mintwiki serve`. Backup and migration are copying the data directory.
+
 ## Acceptance demo
 
 `scripts/demo.sh` runs the acceptance test end-to-end (fresh binary, empty data dir): first edit, stale-writer conflict, out-of-scope rejection, approve-tier propose/accept, revoked token, expired token, the service token exchange and its approval queue, the MCP tools (list, initialize, get_page/get_section/search/backlinks/recent_changes, propose_edit with and without a token), the WebMCP registration file, receipt-chain verification, and a restart from a copied data directory.
@@ -106,7 +120,8 @@ bash scripts/demo.sh
 ## Layout
 
 ```
-cmd/mintwiki/     CLI: init | serve | build | mint | revoke | service | mint-requests | approve-request | deny-request | proposals | accept | verify-receipts | tools
+cmd/mintwiki/     CLI: init | serve | build | mint | revoke | service | mint-requests | approve-request | deny-request | proposals | accept | verify-receipts | tools | seed
+deploy/seed/      demo wiki content, written in by `mintwiki seed` (and the Docker entrypoint)
 internal/store/   content-addressed .md revisions + SQLite manifest & CAS heads + pages/ mirror + service registry
 internal/token/   mint / verify / scope matching (single-purpose HMAC secret)
 internal/policy/  local policy file (TTL caps), checked at request time
@@ -119,7 +134,7 @@ internal/web/     static site serving + POST /edit + POST /v1/tokens (the exchan
 ## Roadmap
 
 - **M2 (done):** agent read surfaces — WebMCP tool registration in the web app and an HTTP MCP server, both generated from one tool definition set (`get_page`, `get_section`, `search`, `backlinks`, `recent_changes`, `propose_edit`).
-- Next: public demo deployment.
+- **Deployment (in this repo):** Dockerfile + compose (localhost bind, optional Cloudflare Tunnel connector) and seeded demo content.
 - Later: human edit UI with a propose-and-accept queue, private-wiki read tokens, optional maintenance ("dreaming") modules, S3-compatible revision backend.
 
 ## License

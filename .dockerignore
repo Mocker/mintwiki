@@ -1,0 +1,4 @@
+data/
+.git/
+*.md
+!deploy/seed/**/*.md
