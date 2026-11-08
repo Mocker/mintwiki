@@ -1,0 +1,5 @@
+/mintwiki
+/mintwiki.exe
+data/
+*.db
+*.log
