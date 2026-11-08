@@ -1,0 +1,33 @@
+# MintWiki demo deployment.
+#
+#   docker compose up -d --build
+#
+# The wiki binds localhost only: public traffic should arrive through a
+# Cloudflare Tunnel (the cloudflared profile below), a reverse proxy, or
+# your platform's ingress — never a directly exposed port.
+services:
+  mintwiki:
+    build: .
+    image: mintwiki
+    restart: unless-stopped
+    volumes:
+      - mintwiki-data:/data
+    ports:
+      - "127.0.0.1:8090:8090"
+
+  # Optional: Cloudflare Tunnel connector. Create the tunnel in the
+  # Cloudflare dashboard (Zero Trust → Networks → Tunnels), route the
+  # public hostname to http://mintwiki:8090, then:
+  #   TUNNEL_TOKEN=<token> docker compose --profile tunnel up -d
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    profiles: ["tunnel"]
+    depends_on:
+      - mintwiki
+    environment:
+      TUNNEL_TOKEN: "${TUNNEL_TOKEN:?set TUNNEL_TOKEN to the tunnel token from the Cloudflare dashboard}"
+    command: tunnel --no-autoupdate run
+
+volumes:
+  mintwiki-data:
