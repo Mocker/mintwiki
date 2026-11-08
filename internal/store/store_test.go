@@ -93,6 +93,37 @@ func TestTokenRegistry(t *testing.T) {
 	}
 }
 
+func TestRecentChanges(t *testing.T) {
+	s := openTest(t)
+	if _, _, _, err := s.PutPage("a/one", []byte("# one"), 0, "owner", "jti-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := s.PutPage("a/two", []byte("# two"), 0, "agent", "jti-2"); err != nil {
+		t.Fatal(err)
+	}
+	rev3, _, _, err := s.PutPage("a/one", []byte("# one v2"), 1, "agent", "jti-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes, err := s.RecentChanges(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changes) != 3 {
+		t.Fatalf("want 3 changes, got %d", len(changes))
+	}
+	if changes[0].RevID != rev3 || changes[0].PagePath != "a/one" || changes[0].Author != "agent" {
+		t.Fatalf("newest first: %+v", changes[0])
+	}
+	if changes[0].ParentRev == "" {
+		t.Fatal("v2 revision should name its parent revision")
+	}
+	one, err := s.RecentChanges(1)
+	if err != nil || len(one) != 1 || one[0].RevID != rev3 {
+		t.Fatalf("limit 1: %+v err=%v", one, err)
+	}
+}
+
 func TestNormalizePath(t *testing.T) {
 	if p, err := NormalizePath("/projects/demo"); err != nil || p != "projects/demo" {
 		t.Fatalf("got %q err=%v", p, err)
