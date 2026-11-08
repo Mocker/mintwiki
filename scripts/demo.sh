@@ -46,6 +46,8 @@ REV1=$(echo "$body" | json_get revision)
 page=$(curl -s "$BASE/projects/demo")
 echo "$page" | grep -q "Demo page" && echo "PASS: page renders its content" && PASS=$((PASS+1)) || { echo "FAIL: page render"; FAIL=$((FAIL+1)); }
 echo "$page" | grep -q "$REV1" && echo "PASS: render names revision R1" && PASS=$((PASS+1)) || { echo "FAIL: revision not in render"; FAIL=$((FAIL+1)); }
+grep -q "# Demo page" "$DATA/pages/projects/demo.md" && echo "PASS: page head lives as a plain .md file" && PASS=$((PASS+1)) || { echo "FAIL: .md mirror missing"; FAIL=$((FAIL+1)); }
+grep -q "Demo page" "$DATA/site/projects/demo.html" && echo "PASS: static HTML built for the page" && PASS=$((PASS+1)) || { echo "FAIL: static html missing"; FAIL=$((FAIL+1)); }
 
 echo "== step 3: stale writer conflicts =="
 resp=$(edit "$TOK" projects/demo "# stale overwrite" 0); code=$(echo "$resp" | tail -1)
@@ -70,6 +72,7 @@ echo "$page" | grep -q "Demo page v2" && { echo "FAIL: proposal moved the head";
 "$BIN" accept --data "$DATA" --proposal "$PROP" >/dev/null || { echo "FAIL: accept command"; FAIL=$((FAIL+1)); }
 page=$(curl -s "$BASE/projects/demo")
 echo "$page" | grep -q "Demo page v2" && echo "PASS: accepted proposal moved the head" && PASS=$((PASS+1)) || { echo "FAIL: accepted content not live"; FAIL=$((FAIL+1)); }
+grep -q "Demo page v2" "$DATA/pages/projects/demo.md" && echo "PASS: .md mirror follows the accepted head" && PASS=$((PASS+1)) || { echo "FAIL: .md mirror stale after accept"; FAIL=$((FAIL+1)); }
 
 echo "== step 6: revoked and expired tokens rejected =="
 MINT_OUT=$("$BIN" mint --data "$DATA" --actor agent-3 --paths /projects/** --tier allow)
@@ -82,6 +85,41 @@ TOK4=$(echo "$MINT_OUT" | sed -n 's/^token: //p')
 sleep 2
 resp=$(edit "$TOK4" projects/demo "# expired write" 2); code=$(echo "$resp" | tail -1)
 ok "$code" "401" "expired token rejected with 401"
+
+echo "== step 6b: service credential exchanges for a short-lived token =="
+SVC_OUT=$("$BIN" service add --data "$DATA" --name demo-agent --ceiling /projects/** --tiers allow --max-ttl 30m)
+SVC_CRED=$(echo "$SVC_OUT" | sed -n 's/^credential: //p')
+[ -n "$SVC_CRED" ] && echo "PASS: service registered, credential shown once" && PASS=$((PASS+1)) || { echo "FAIL: service add"; FAIL=$((FAIL+1)); }
+mint_call() { # cred body -> "code body"
+  curl -s -w $'\n%{http_code}' -X POST "$BASE/v1/tokens" -H "Authorization: Bearer $1" -H 'Content-Type: application/json' -d "$2"
+}
+resp=$(mint_call "$SVC_CRED" '{"paths":["/projects/**"],"ttl_seconds":600}'); code=$(echo "$resp" | tail -1); body=$(echo "$resp" | head -n -1)
+ok "$code" "200" "exchange inside ceiling issues a token"
+XTOK=$(echo "$body" | json_get token)
+resp=$(edit "$XTOK" projects/demo "# Demo page v2 (service edit)" 2); code=$(echo "$resp" | tail -1)
+ok "$code" "200" "exchanged token edits the page"
+resp=$(mint_call "$SVC_CRED" '{"paths":["/private/**"],"ttl_seconds":600}'); code=$(echo "$resp" | tail -1); body=$(echo "$resp" | head -n -1)
+ok "$code" "202" "exchange above ceiling escalates to the owner queue (202)"
+REQID=$(echo "$body" | json_get request_id)
+resp=$(mint_call "mwsvc_bogus" '{"paths":["/projects/**"]}'); code=$(echo "$resp" | tail -1)
+ok "$code" "401" "unknown service credential rejected with 401"
+
+echo "== step 6c: owner approves the escalated request; service picks up its token =="
+poll() { curl -s -w $'\n%{http_code}' "$BASE/v1/tokens/$2" -H "Authorization: Bearer $1"; }
+resp=$(poll "$SVC_CRED" "$REQID"); body=$(echo "$resp" | head -n -1)
+[ "$(echo "$body" | json_get status)" = "pending" ] && echo "PASS: request waits as pending" && PASS=$((PASS+1)) || { echo "FAIL: poll pending: $body"; FAIL=$((FAIL+1)); }
+"$BIN" mint-requests --data "$DATA" | grep -q "$REQID" && echo "PASS: owner queue lists the request" && PASS=$((PASS+1)) || { echo "FAIL: mint-requests list"; FAIL=$((FAIL+1)); }
+"$BIN" approve-request --data "$DATA" --id "$REQID" >/dev/null || { echo "FAIL: approve-request"; FAIL=$((FAIL+1)); }
+resp=$(poll "$SVC_CRED" "$REQID"); body=$(echo "$resp" | head -n -1)
+XTOK2=$(echo "$body" | json_get token)
+[ -n "$XTOK2" ] && echo "PASS: pickup after approval delivers the token" && PASS=$((PASS+1)) || { echo "FAIL: pickup: $body"; FAIL=$((FAIL+1)); }
+resp=$(edit "$XTOK2" private/x "# Approved scope page" 0); code=$(echo "$resp" | tail -1)
+ok "$code" "200" "approved token edits the out-of-ceiling page"
+resp=$(mint_call "$SVC_CRED" '{"paths":["/secret/**"],"ttl_seconds":600}'); body=$(echo "$resp" | head -n -1)
+REQID2=$(echo "$body" | json_get request_id)
+"$BIN" deny-request --data "$DATA" --id "$REQID2" >/dev/null || { echo "FAIL: deny-request"; FAIL=$((FAIL+1)); }
+resp=$(poll "$SVC_CRED" "$REQID2"); body=$(echo "$resp" | head -n -1)
+[ "$(echo "$body" | json_get status)" = "denied" ] && [ -z "$(echo "$body" | json_get token)" ] && echo "PASS: denied request yields no token" && PASS=$((PASS+1)) || { echo "FAIL: denied poll: $body"; FAIL=$((FAIL+1)); }
 
 echo "== step 7: receipts verify; restart + data-dir copy renders the same page =="
 out=$("$BIN" verify-receipts --data "$DATA")

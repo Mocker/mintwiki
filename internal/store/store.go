@@ -5,6 +5,7 @@
 package store
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -52,6 +53,9 @@ func Open(dataDir string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Join(dataDir, "revisions"), 0o755); err != nil {
 		return nil, err
 	}
+	if err := os.MkdirAll(filepath.Join(dataDir, "pages"), 0o755); err != nil {
+		return nil, err
+	}
 	db, err := sql.Open("sqlite", filepath.Join(dataDir, "mintwiki.db"))
 	if err != nil {
 		return nil, err
@@ -90,6 +94,26 @@ CREATE TABLE IF NOT EXISTS proposals (
   status TEXT NOT NULL DEFAULT 'pending',
   token_jti TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS services (
+  name TEXT PRIMARY KEY,
+  cred_hash TEXT NOT NULL,
+  ceiling_paths TEXT NOT NULL DEFAULT '',
+  tiers TEXT NOT NULL DEFAULT '',
+  max_ttl_seconds INTEGER NOT NULL DEFAULT 1800,
+  revoked INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS mint_requests (
+  id TEXT PRIMARY KEY,
+  service TEXT NOT NULL,
+  tool TEXT NOT NULL,
+  paths TEXT NOT NULL DEFAULT '',
+  tier TEXT NOT NULL DEFAULT 'allow',
+  ttl_seconds INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT NOT NULL,
+  decided_at TEXT NOT NULL DEFAULT ''
 );`)
 	if err != nil {
 		return nil, err
@@ -101,8 +125,9 @@ func (s *Store) Close() error { return s.db.Close() }
 
 func now() string { return time.Now().UTC().Format(time.RFC3339) }
 
-// WriteRevision stores content as an immutable revision object and returns
-// its content hash. Writing the same content twice is a no-op.
+// WriteRevision stores content as an immutable revision object — a plain
+// Markdown file named by its content hash — and returns the hash.
+// Writing the same content twice is a no-op.
 func (s *Store) WriteRevision(content []byte) (string, error) {
 	sum := sha256.Sum256(content)
 	id := hex.EncodeToString(sum[:])
@@ -110,7 +135,7 @@ func (s *Store) WriteRevision(content []byte) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
-	p := filepath.Join(dir, id)
+	p := filepath.Join(dir, id+".md")
 	if _, err := os.Stat(p); err == nil {
 		return id, nil
 	}
@@ -129,11 +154,33 @@ func (s *Store) ReadRevision(revID string) ([]byte, error) {
 	if len(revID) < 2 {
 		return nil, ErrNotFound
 	}
-	b, err := os.ReadFile(filepath.Join(s.dataDir, "revisions", revID[:2], revID))
+	b, err := os.ReadFile(filepath.Join(s.dataDir, "revisions", revID[:2], revID+".md"))
 	if err != nil {
 		return nil, ErrNotFound
 	}
 	return b, nil
+}
+
+// PageFilePath is where a page's current head lives as a plain Markdown
+// file (data/pages/<path>.md) — readable and editable with any tool.
+func (s *Store) PageFilePath(path string) string {
+	return filepath.Join(s.dataDir, "pages", filepath.FromSlash(path)+".md")
+}
+
+// mirrorHead writes the page's current head content to its .md file.
+// The mirror is a materialized view of the store, kept in step on every
+// head move; the store (revisions + SQLite heads) stays the source of
+// truth and the mirror can always be regenerated from it.
+func (s *Store) mirrorHead(path string, content []byte) error {
+	p := s.PageFilePath(path)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return err
+	}
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, content, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, p)
 }
 
 // GetPage returns the page at its current head.
@@ -228,6 +275,9 @@ func (s *Store) PutPage(path string, content []byte, expectedVersion int64, auth
 	}
 	if err := tx.Commit(); err != nil {
 		return "", 0, curVer, err
+	}
+	if err := s.mirrorHead(path, content); err != nil {
+		return "", 0, curVer, fmt.Errorf("head moved to %s but page mirror failed: %w", revID, err)
 	}
 	return revID, newVersion, curVer, nil
 }
@@ -361,6 +411,206 @@ func (s *Store) IsRegistered(jti string) (bool, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM tokens WHERE jti=?`, jti).Scan(&n)
 	return n > 0, err
+}
+
+// HashCredential is how service credentials are stored: the raw
+// credential is shown to the owner exactly once (at `service add`) and
+// never persisted; only this SHA-256 hash is.
+func HashCredential(cred string) string {
+	sum := sha256.Sum256([]byte(cred))
+	return hex.EncodeToString(sum[:])
+}
+
+// Service is a registered minting client: a long-lived credential (only
+// its hash is stored) that the service exchanges at the mint endpoint for
+// short-lived edit tokens, bounded by a scope ceiling the owner set.
+type Service struct {
+	Name           string
+	CredHash       string
+	CeilingPaths   []string
+	Tiers          []string
+	MaxTTLSeconds  int64
+	Revoked        bool
+	CreatedAt      string
+}
+
+// RegisterService adds (or replaces) a service credential + ceiling.
+func (s *Store) RegisterService(name, credHash string, ceilingPaths, tiers []string, maxTTLSeconds int64) error {
+	_, err := s.db.Exec(`INSERT OR REPLACE INTO services(name, cred_hash, ceiling_paths, tiers, max_ttl_seconds, revoked, created_at)
+		VALUES(?,?,?,?,?,0,?)`, name, credHash, strings.Join(ceilingPaths, ","), strings.Join(tiers, ","), maxTTLSeconds, now())
+	return err
+}
+
+// GetServiceByHash looks a service up by its credential hash (the raw
+// credential is never stored).
+func (s *Store) GetServiceByHash(credHash string) (*Service, error) {
+	svc := &Service{}
+	var paths, tiers string
+	var revoked int
+	err := s.db.QueryRow(`SELECT name, cred_hash, ceiling_paths, tiers, max_ttl_seconds, revoked, created_at
+		FROM services WHERE cred_hash=?`, credHash).
+		Scan(&svc.Name, &svc.CredHash, &paths, &tiers, &svc.MaxTTLSeconds, &revoked, &svc.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if paths != "" {
+		svc.CeilingPaths = strings.Split(paths, ",")
+	}
+	if tiers != "" {
+		svc.Tiers = strings.Split(tiers, ",")
+	}
+	svc.Revoked = revoked == 1
+	return svc, nil
+}
+
+// RevokeService disables a service credential immediately.
+func (s *Store) RevokeService(name string) error {
+	_, err := s.db.Exec(`UPDATE services SET revoked=1 WHERE name=?`, name)
+	return err
+}
+
+// ListServices returns all registered services (hashes not included in
+// String output by callers; the struct is for internal use).
+func (s *Store) ListServices() ([]*Service, error) {
+	rows, err := s.db.Query(`SELECT name, cred_hash, ceiling_paths, tiers, max_ttl_seconds, revoked, created_at FROM services ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Service
+	for rows.Next() {
+		svc := &Service{}
+		var paths, tiers string
+		var revoked int
+		if err := rows.Scan(&svc.Name, &svc.CredHash, &paths, &tiers, &svc.MaxTTLSeconds, &revoked, &svc.CreatedAt); err != nil {
+			return nil, err
+		}
+		if paths != "" {
+			svc.CeilingPaths = strings.Split(paths, ",")
+		}
+		if tiers != "" {
+			svc.Tiers = strings.Split(tiers, ",")
+		}
+		svc.Revoked = revoked == 1
+		out = append(out, svc)
+	}
+	return out, rows.Err()
+}
+
+// MintRequest is a service's request for a token above its ceiling,
+// waiting on the owner's decision. A request is worthless until approved:
+// submitting one needs no trust beyond a valid service credential, and
+// the token is only minted when the service picks it up after approval.
+type MintRequest struct {
+	ID         string
+	Service    string
+	Tool       string
+	Paths      []string
+	Tier       string
+	TTLSeconds int64
+	Status     string // pending | approved | denied | issued | expired
+	CreatedAt  string
+	DecidedAt  string
+}
+
+// CreateMintRequest records a pending mint request and returns its ID.
+func (s *Store) CreateMintRequest(service, tool string, paths []string, tier string, ttlSeconds int64) (string, error) {
+	id := fmt.Sprintf("mreq-%d-%s", time.Now().UnixNano(), func() string {
+		b := make([]byte, 6)
+		if _, err := rand.Read(b); err != nil {
+			panic(err)
+		}
+		return hex.EncodeToString(b)
+	}())
+	_, err := s.db.Exec(`INSERT INTO mint_requests(id, service, tool, paths, tier, ttl_seconds, status, created_at)
+		VALUES(?,?,?,?,?,?,'pending',?)`, id, service, tool, strings.Join(paths, ","), tier, ttlSeconds, now())
+	return id, err
+}
+
+func scanMintRequest(row interface{ Scan(...any) error }) (*MintRequest, error) {
+	m := &MintRequest{}
+	var paths string
+	if err := row.Scan(&m.ID, &m.Service, &m.Tool, &paths, &m.Tier, &m.TTLSeconds, &m.Status, &m.CreatedAt, &m.DecidedAt); err != nil {
+		return nil, err
+	}
+	if paths != "" {
+		m.Paths = strings.Split(paths, ",")
+	}
+	return m, nil
+}
+
+const mintRequestCols = `id, service, tool, paths, tier, ttl_seconds, status, created_at, decided_at`
+
+// GetMintRequest loads one mint request.
+func (s *Store) GetMintRequest(id string) (*MintRequest, error) {
+	m, err := scanMintRequest(s.db.QueryRow(`SELECT `+mintRequestCols+` FROM mint_requests WHERE id=?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return m, err
+}
+
+// FindPendingMintRequest returns the pending request identical to the
+// given one, if it exists — re-submitting a pending request returns the
+// original instead of spamming the owner's queue.
+func (s *Store) FindPendingMintRequest(service, tool string, paths []string, tier string, ttlSeconds int64) (*MintRequest, error) {
+	m, err := scanMintRequest(s.db.QueryRow(`SELECT `+mintRequestCols+` FROM mint_requests
+		WHERE service=? AND tool=? AND paths=? AND tier=? AND ttl_seconds=? AND status='pending'`,
+		service, tool, strings.Join(paths, ","), tier, ttlSeconds))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return m, err
+}
+
+// ListMintRequests returns mint requests with the given status ("" = all).
+func (s *Store) ListMintRequests(status string) ([]*MintRequest, error) {
+	q := `SELECT ` + mintRequestCols + ` FROM mint_requests`
+	if status != "" {
+		q += ` WHERE status='` + status + `'`
+	}
+	q += ` ORDER BY created_at`
+	rows, err := s.db.Query(q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*MintRequest
+	for rows.Next() {
+		m, err := scanMintRequest(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// DecideMintRequest records the owner's decision on a pending request.
+func (s *Store) DecideMintRequest(id string, approve bool) error {
+	status := "denied"
+	if approve {
+		status = "approved"
+	}
+	res, err := s.db.Exec(`UPDATE mint_requests SET status=?, decided_at=? WHERE id=? AND status='pending'`,
+		status, now(), id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("mint request %s is not pending", id)
+	}
+	return nil
+}
+
+// SetMintRequestStatus moves a request to a terminal bookkeeping state
+// (issued / expired).
+func (s *Store) SetMintRequestStatus(id, status string) error {
+	_, err := s.db.Exec(`UPDATE mint_requests SET status=? WHERE id=?`, status, id)
+	return err
 }
 
 // NormalizePath cleans a wiki path: no leading slash, no empty segments,

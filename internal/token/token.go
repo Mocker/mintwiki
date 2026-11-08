@@ -52,6 +52,42 @@ func (c *Claims) CoversPath(path string) bool {
 	return false
 }
 
+// CoversPattern reports whether a ceiling pattern covers a requested
+// pattern — the mint endpoint's subset check: a service may only receive
+// tokens whose scope is within the ceiling the owner granted it.
+// "/**" covers everything; "P/**" covers P, P/**, and anything under P/;
+// an exact pattern covers only itself.
+func CoversPattern(ceilingPattern, requestedPattern string) bool {
+	c := strings.TrimPrefix(ceilingPattern, "/")
+	r := strings.TrimPrefix(requestedPattern, "/")
+	if c == "**" {
+		return true
+	}
+	if strings.HasSuffix(c, "/**") {
+		prefix := strings.TrimSuffix(c, "/**")
+		return r == prefix || r == prefix+"/**" || strings.HasPrefix(r, prefix+"/")
+	}
+	return c == r
+}
+
+// WithinCeiling reports whether every requested pattern is covered by at
+// least one ceiling pattern.
+func WithinCeiling(ceiling, requested []string) bool {
+	for _, r := range requested {
+		ok := false
+		for _, c := range ceiling {
+			if CoversPattern(c, r) {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
 func matchPattern(pattern, path string) bool {
 	pattern = strings.TrimPrefix(pattern, "/")
 	path = strings.TrimPrefix(path, "/")

@@ -23,7 +23,9 @@ A token is an HMAC-signed JWT carrying:
 
 Every write is checked at request time, in order: signature → expiry → token was minted here → not revoked → scope covers this page → tier → compare-and-swap on the page head. Every attempt — applied, proposed, or rejected — appends a hash-chained audit receipt.
 
-Pages are immutable content-addressed revisions; the only mutable state is one head pointer per page, moved by CAS inside a SQLite transaction. A stale writer gets a conflict and the current head version, never a silent overwrite. Revert = move the head back; history is never rewritten. Every page render names the exact revision it shows.
+Pages are Markdown files, all the way down. Every revision is an immutable `.md` file named by its content hash; each page's current head also lives as a plain `.md` file at `data/pages/<path>.md`, readable (and inspectable) with any tool. The only mutable state is one head pointer per page in SQLite, moved by CAS inside a transaction. A stale writer gets a conflict and the current head version, never a silent overwrite. Revert = move the head back; history is never rewritten.
+
+Viewing is static: the wiki builds to plain HTML (`data/site/`, one `.html` per page plus an index) and the server serves those files — the build is regenerated whenever a head moves, and any static file server can serve the output just as well. Every built page names the exact revision it shows.
 
 ## Quickstart
 
@@ -38,9 +40,32 @@ curl -X POST localhost:8090/edit \
   -H "Authorization: Bearer <token>" \
   -d '{"path":"projects/demo","content":"# Hello","expected_version":0}'
 
-curl localhost:8090/projects/demo        # renders the page + its revision ID
+curl localhost:8090/projects/demo        # serves the built page + its revision ID
+./mintwiki build --data data             # rebuild the static site by hand
 ./mintwiki verify-receipts --data data   # check the audit chain
 ```
+
+The minting question — *what authenticates the minter?* The root stays local: the signing key is a `0600` file in the data directory, and the owner's CLI mints with it directly (the SSH-key trust model). But editors never touch that path day-to-day — it would put a human in the loop for every edit. Instead, day-to-day issuance is a **token exchange**:
+
+## Service credentials & the token exchange
+
+Each agent runtime / service gets a long-lived **service credential** with a **scope ceiling** set by the owner:
+
+```
+mintwiki service add --name anna --ceiling /projects/**,/notes/** --tiers allow --max-ttl 30m
+```
+
+The credential is shown exactly once; only its SHA-256 hash is stored. The service keeps it in its own secret store and exchanges it at the mint endpoint for short-lived edit tokens:
+
+```
+POST /v1/tokens   Authorization: Bearer <service credential>
+{"paths": ["/projects/**"], "tier": "allow", "ttl_seconds": 600}
+→ {"token": "<short-lived JWT>", "jti": "...", "expires_at": "..."}
+```
+
+The gates, checked in order: credential known → service not revoked → requested paths **within the service's ceiling** (a subset check — a service can narrow its scope, never widen it) → tier allowed for this service → TTL within both the service cap and wiki policy. Requests inside the ceiling are issued automatically, no human involved; anything outside is denied and receipted. This is the standard exchange pattern (OAuth 2.0 token exchange, AWS STS): the sensitive credential never authorizes an edit itself — it only authenticates its holder to the minter, and the tokens it buys are scoped, short-lived, and revocable per-jti. Revoking the service credential (`service revoke`) cuts off all future exchanges; already-issued tokens still die at their short expiry or by jti.
+
+Requests *above* a ceiling are not flatly denied — they **escalate to the owner's approval queue**. The exchange answers `202` with a request ID; the service polls `GET /v1/tokens/<request-id>` with its credential. The owner reviews with `mintwiki mint-requests` and decides with `approve-request` / `deny-request`. On approval, the token is minted *at pickup* (TTL counts from pickup, nothing sensitive is stored against the request) and delivered exactly once. A request is worthless until approved, so submitting one needs no trust — and the human gate appears exactly where the envelope ends, which is where it belongs. Pending requests expire after 24 hours; re-submitting an identical pending request returns the original instead of spamming the queue.
 
 Backup is copying the data directory. Moving the wiki is copying the data directory.
 
@@ -55,12 +80,13 @@ bash scripts/demo.sh
 ## Layout
 
 ```
-cmd/mintwiki/     CLI: init | serve | mint | revoke | proposals | accept | verify-receipts
-internal/store/   content-addressed revisions + SQLite manifest & CAS heads
+cmd/mintwiki/     CLI: init | serve | build | mint | revoke | service | mint-requests | approve-request | deny-request | proposals | accept | verify-receipts
+internal/store/   content-addressed .md revisions + SQLite manifest & CAS heads + pages/ mirror + service registry
 internal/token/   mint / verify / scope matching (single-purpose HMAC secret)
 internal/policy/  local policy file (TTL caps), checked at request time
 internal/receipts/ append-only hash-chained audit log
-internal/web/     page rendering + POST /edit
+internal/site/    static HTML builder (index + one .html per page)
+internal/web/     static site serving + POST /edit + POST /v1/tokens (the exchange)
 ```
 
 ## Roadmap

@@ -51,6 +51,29 @@ func TestWrongKeyFails(t *testing.T) {
 	}
 }
 
+func TestCeilingSubset(t *testing.T) {
+	cases := []struct {
+		ceiling, requested []string
+		want               bool
+	}{
+		{[]string{"/**"}, []string{"/private/x"}, true},
+		{[]string{"/projects/**"}, []string{"/projects/demo"}, true},
+		{[]string{"/projects/**"}, []string{"/projects/**"}, true},
+		{[]string{"/projects/**"}, []string{"/projects"}, true},
+		{[]string{"/projects/**"}, []string{"/private/**"}, false},
+		{[]string{"/projects/**"}, []string{"/**"}, false},
+		{[]string{"/projects/demo"}, []string{"/projects/demo"}, true},
+		{[]string{"/projects/demo"}, []string{"/projects/**"}, false},
+		{[]string{"/a/**", "/b/**"}, []string{"/a/x", "/b/y"}, true},
+		{[]string{"/a/**", "/b/**"}, []string{"/a/x", "/c/y"}, false},
+	}
+	for _, c := range cases {
+		if got := WithinCeiling(c.ceiling, c.requested); got != c.want {
+			t.Errorf("WithinCeiling(%v, %v) = %v, want %v", c.ceiling, c.requested, got, c.want)
+		}
+	}
+}
+
 func TestPatternMatching(t *testing.T) {
 	cases := []struct {
 		pattern, path string
