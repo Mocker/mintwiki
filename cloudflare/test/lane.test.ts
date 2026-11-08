@@ -1,0 +1,199 @@
+import { SELF } from "cloudflare:test";
+import { describe, expect, it } from "vitest";
+import { keyBytesFromHex, mint } from "../src/token";
+
+// M3.2 acceptance for the Cloudflare runtime: the write lane behaves
+// like the Go server's — exchange inside the ceiling, CAS edits,
+// approve-tier proposals, revocation, expiry, and the escalation
+// queue with dedupe, cross-service privacy, and deliver-once pickup.
+// Mirrors the scripts/demo.sh lane scenarios; the conformance suite
+// runs the HTTP-observable subset against both runtimes.
+
+const TEST_SECRET_HEX = "abababababababababababababababababababababababababababababababab";
+const CRED = "mwsvc_" + "11".repeat(32);
+const CRED_OTHER = "mwsvc_" + "22".repeat(32);
+const CRED_BIGTTL = "mwsvc_" + "33".repeat(32);
+
+async function call(path: string, init: RequestInit = {}): Promise<{ status: number; body: any }> {
+  const res = await SELF.fetch(`https://mw${path}`, init);
+  const body = await res.json().catch(() => ({}));
+  return { status: res.status, body };
+}
+
+function bearer(credOrToken: string): Record<string, string> {
+  return { authorization: `Bearer ${credOrToken}`, "content-type": "application/json" };
+}
+
+async function exchange(cred: string, req: Record<string, unknown>) {
+  return call("/v1/tokens", { method: "POST", headers: bearer(cred), body: JSON.stringify(req) });
+}
+
+async function edit(token: string, path: string, content: string, expected: number) {
+  return call("/edit", {
+    method: "POST",
+    headers: bearer(token),
+    body: JSON.stringify({ path, content, expected_version: expected }),
+  });
+}
+
+describe("mintwiki write lane (M3.2)", () => {
+  it("runs the full lane: exchange, edit, conflict, propose/accept, revoke, escalation", async () => {
+    // Owner bootstrap (pre-admin stand-ins for the Go CLI).
+    const reg = await call("/internal/register-service", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "lane-agent",
+        credential: CRED,
+        ceiling_paths: ["/sandbox/**"],
+        tiers: ["allow", "approve"],
+        max_ttl_seconds: 1800,
+      }),
+    });
+    expect(reg.status).toBe(200);
+    await call("/internal/register-service", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "lane-other",
+        credential: CRED_OTHER,
+        ceiling_paths: ["/sandbox/**"],
+        tiers: ["allow"],
+        max_ttl_seconds: 1800,
+      }),
+    });
+    await call("/internal/register-service", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "lane-bigttl",
+        credential: CRED_BIGTTL,
+        ceiling_paths: ["/sandbox/**"],
+        tiers: ["allow"],
+        max_ttl_seconds: 7200,
+      }),
+    });
+
+    // Exchange inside the ceiling → token; CAS edit applies.
+    const ex = await exchange(CRED, { tool: "edit_page", paths: ["/sandbox/**"], tier: "allow", ttl_seconds: 600 });
+    expect(ex.status).toBe(200);
+    expect(ex.body.token).toBeTruthy();
+    const token = ex.body.token as string;
+
+    const applied = await edit(token, "sandbox/lane-probe", "# Lane probe\n\nversion one\n", 0);
+    expect(applied.status).toBe(200);
+    expect(applied.body).toMatchObject({ status: "applied", version: 1 });
+
+    const pageRes = await SELF.fetch("https://mw/sandbox/lane-probe");
+    expect(pageRes.status).toBe(200);
+    expect(await pageRes.text()).toContain("version one");
+
+    // Stale writer conflicts with the current version named.
+    const stale = await edit(token, "sandbox/lane-probe", "# Lane probe\n\nstale\n", 0);
+    expect(stale.status).toBe(409);
+    expect(stale.body.current_version).toBe(1);
+
+    // A narrower token cannot edit outside its own scope.
+    const narrow = await exchange(CRED, { paths: ["/sandbox/narrow/**"], tier: "allow", ttl_seconds: 600 });
+    const outOfScope = await edit(narrow.body.token, "sandbox/lane-probe", "nope", 1);
+    expect(outOfScope.status).toBe(403);
+
+    // No token at all, and a well-formed token this wiki never minted.
+    const noTok = await call("/edit", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path: "sandbox/lane-probe", content: "x", expected_version: 1 }),
+    });
+    expect(noTok.status).toBe(401);
+    const ghost = await mint(keyBytesFromHex(TEST_SECRET_HEX), "ghost", "edit_page", ["/sandbox/**"], "allow", 600);
+    const ghostEdit = await edit(ghost.token, "sandbox/lane-probe", "boo", 1);
+    expect(ghostEdit.status).toBe(401);
+    expect(ghostEdit.body.error).toBe("token not minted by this wiki");
+
+    // Approve tier: lands as a proposal; the head does not move until
+    // the owner accepts.
+    const exApprove = await exchange(CRED, { paths: ["/sandbox/**"], tier: "approve", ttl_seconds: 600 });
+    const proposed = await edit(exApprove.body.token, "sandbox/lane-probe", "# Lane probe\n\nversion two\n", 1);
+    expect(proposed.status).toBe(202);
+    expect(proposed.body.status).toBe("proposed");
+    const stillV1 = await (await SELF.fetch("https://mw/sandbox/lane-probe")).text();
+    expect(stillV1).toContain("version one");
+    const accepted = await call("/internal/accept-proposal", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: proposed.body.proposal_id }),
+    });
+    expect(accepted.status).toBe(200);
+    expect(accepted.body.version).toBe(2);
+    const nowV2 = await (await SELF.fetch("https://mw/sandbox/lane-probe")).text();
+    expect(nowV2).toContain("version two");
+
+    // Revocation is immediate.
+    const ex2 = await exchange(CRED, { paths: ["/sandbox/**"], tier: "allow", ttl_seconds: 600 });
+    await call("/internal/revoke-token", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jti: ex2.body.jti }),
+    });
+    const revokedEdit = await edit(ex2.body.token, "sandbox/lane-probe", "x", 2);
+    expect(revokedEdit.status).toBe(401);
+    expect(revokedEdit.body.error).toBe("token revoked");
+
+    // Escalation: outside the ceiling → 202, deduped, private to the
+    // requesting service, minted at pickup, delivered once.
+    const esc = await exchange(CRED, { paths: ["/projects/**"], tier: "allow", ttl_seconds: 600 });
+    expect(esc.status).toBe(202);
+    expect(esc.body.status).toBe("pending_approval");
+    const reqID = esc.body.request_id as string;
+    const escAgain = await exchange(CRED, { paths: ["/projects/**"], tier: "allow", ttl_seconds: 600 });
+    expect(escAgain.body.request_id).toBe(reqID);
+
+    const crossPoll = await call(`/v1/tokens/${reqID}`, { headers: bearer(CRED_OTHER) });
+    expect(crossPoll.status).toBe(404);
+    const pendingPoll = await call(`/v1/tokens/${reqID}`, { headers: bearer(CRED) });
+    expect(pendingPoll.body.status).toBe("pending");
+
+    const decide = await call("/internal/decide-mint-request", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: reqID, approve: true }),
+    });
+    expect(decide.status).toBe(200);
+
+    const pickup = await call(`/v1/tokens/${reqID}`, { headers: bearer(CRED) });
+    expect(pickup.status).toBe(200);
+    expect(pickup.body.status).toBe("approved");
+    expect(pickup.body.token).toBeTruthy();
+    const secondPickup = await call(`/v1/tokens/${reqID}`, { headers: bearer(CRED) });
+    expect(secondPickup.body.status).toBe("issued");
+    expect(secondPickup.body.token).toBeUndefined();
+
+    // The widened token really works on the widened scope.
+    const widened = await edit(pickup.body.token, "projects/lane-x", "# Widened\n", 0);
+    expect(widened.status).toBe(200);
+
+    // TTL past the wiki policy escalates even when the service cap
+    // would allow it.
+    const polEsc = await exchange(CRED_BIGTTL, { paths: ["/sandbox/**"], tier: "allow", ttl_seconds: 5000 });
+    expect(polEsc.status).toBe(202);
+
+    // Unknown credential is a flat 401, never an escalation.
+    const unknown = await exchange("mwsvc_" + "99".repeat(32), { paths: ["/sandbox/**"] });
+    expect(unknown.status).toBe(401);
+
+    // The whole flow is in the receipt chain, and the chain verifies.
+    const verify = await call("/internal/receipts-verify");
+    expect(verify.status).toBe(200);
+    expect(verify.body.ok).toBe(true);
+    expect(verify.body.entries).toBeGreaterThan(5);
+  });
+
+  it("rejects an expired token", async () => {
+    const short = await exchange(CRED, { paths: ["/sandbox/**"], tier: "allow", ttl_seconds: 1 });
+    expect(short.status).toBe(200);
+    await new Promise((r) => setTimeout(r, 1300));
+    const res = await edit(short.body.token, "sandbox/lane-probe", "too late", 2);
+    expect(res.status).toBe(401);
+    expect(res.body.error).toBe("invalid or expired token");
+  });
+});

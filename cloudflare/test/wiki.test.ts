@@ -58,8 +58,8 @@ describe("mintwiki cloudflare runtime (M3.1)", () => {
     expect(body.entries).toBeGreaterThanOrEqual(1);
   });
 
-  it("write surfaces answer 501 until their milestones land", async () => {
-    const res = await SELF.fetch("https://mw/edit", { method: "POST", body: "{}" });
+  it("the MCP surface answers 501 until M3.3 lands it", async () => {
+    const res = await SELF.fetch("https://mw/mcp", { method: "POST", body: "{}" });
     expect(res.status).toBe(501);
   });
 });
