@@ -98,10 +98,28 @@ ok "$code" "200" "exchange inside ceiling issues a token"
 XTOK=$(echo "$body" | json_get token)
 resp=$(edit "$XTOK" projects/demo "# Demo page v2 (service edit)" 2); code=$(echo "$resp" | tail -1)
 ok "$code" "200" "exchanged token edits the page"
-resp=$(mint_call "$SVC_CRED" '{"paths":["/private/**"]}'); code=$(echo "$resp" | tail -1)
-ok "$code" "403" "exchange above ceiling denied with 403"
+resp=$(mint_call "$SVC_CRED" '{"paths":["/private/**"],"ttl_seconds":600}'); code=$(echo "$resp" | tail -1); body=$(echo "$resp" | head -n -1)
+ok "$code" "202" "exchange above ceiling escalates to the owner queue (202)"
+REQID=$(echo "$body" | json_get request_id)
 resp=$(mint_call "mwsvc_bogus" '{"paths":["/projects/**"]}'); code=$(echo "$resp" | tail -1)
 ok "$code" "401" "unknown service credential rejected with 401"
+
+echo "== step 6c: owner approves the escalated request; service picks up its token =="
+poll() { curl -s -w $'\n%{http_code}' "$BASE/v1/tokens/$2" -H "Authorization: Bearer $1"; }
+resp=$(poll "$SVC_CRED" "$REQID"); body=$(echo "$resp" | head -n -1)
+[ "$(echo "$body" | json_get status)" = "pending" ] && echo "PASS: request waits as pending" && PASS=$((PASS+1)) || { echo "FAIL: poll pending: $body"; FAIL=$((FAIL+1)); }
+"$BIN" mint-requests --data "$DATA" | grep -q "$REQID" && echo "PASS: owner queue lists the request" && PASS=$((PASS+1)) || { echo "FAIL: mint-requests list"; FAIL=$((FAIL+1)); }
+"$BIN" approve-request --data "$DATA" --id "$REQID" >/dev/null || { echo "FAIL: approve-request"; FAIL=$((FAIL+1)); }
+resp=$(poll "$SVC_CRED" "$REQID"); body=$(echo "$resp" | head -n -1)
+XTOK2=$(echo "$body" | json_get token)
+[ -n "$XTOK2" ] && echo "PASS: pickup after approval delivers the token" && PASS=$((PASS+1)) || { echo "FAIL: pickup: $body"; FAIL=$((FAIL+1)); }
+resp=$(edit "$XTOK2" private/x "# Approved scope page" 0); code=$(echo "$resp" | tail -1)
+ok "$code" "200" "approved token edits the out-of-ceiling page"
+resp=$(mint_call "$SVC_CRED" '{"paths":["/secret/**"],"ttl_seconds":600}'); body=$(echo "$resp" | head -n -1)
+REQID2=$(echo "$body" | json_get request_id)
+"$BIN" deny-request --data "$DATA" --id "$REQID2" >/dev/null || { echo "FAIL: deny-request"; FAIL=$((FAIL+1)); }
+resp=$(poll "$SVC_CRED" "$REQID2"); body=$(echo "$resp" | head -n -1)
+[ "$(echo "$body" | json_get status)" = "denied" ] && [ -z "$(echo "$body" | json_get token)" ] && echo "PASS: denied request yields no token" && PASS=$((PASS+1)) || { echo "FAIL: denied poll: $body"; FAIL=$((FAIL+1)); }
 
 echo "== step 7: receipts verify; restart + data-dir copy renders the same page =="
 out=$("$BIN" verify-receipts --data "$DATA")

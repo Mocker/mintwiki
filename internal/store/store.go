@@ -5,6 +5,7 @@
 package store
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -102,6 +103,17 @@ CREATE TABLE IF NOT EXISTS services (
   max_ttl_seconds INTEGER NOT NULL DEFAULT 1800,
   revoked INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS mint_requests (
+  id TEXT PRIMARY KEY,
+  service TEXT NOT NULL,
+  tool TEXT NOT NULL,
+  paths TEXT NOT NULL DEFAULT '',
+  tier TEXT NOT NULL DEFAULT 'allow',
+  ttl_seconds INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT NOT NULL,
+  decided_at TEXT NOT NULL DEFAULT ''
 );`)
 	if err != nil {
 		return nil, err
@@ -486,6 +498,119 @@ func (s *Store) ListServices() ([]*Service, error) {
 		out = append(out, svc)
 	}
 	return out, rows.Err()
+}
+
+// MintRequest is a service's request for a token above its ceiling,
+// waiting on the owner's decision. A request is worthless until approved:
+// submitting one needs no trust beyond a valid service credential, and
+// the token is only minted when the service picks it up after approval.
+type MintRequest struct {
+	ID         string
+	Service    string
+	Tool       string
+	Paths      []string
+	Tier       string
+	TTLSeconds int64
+	Status     string // pending | approved | denied | issued | expired
+	CreatedAt  string
+	DecidedAt  string
+}
+
+// CreateMintRequest records a pending mint request and returns its ID.
+func (s *Store) CreateMintRequest(service, tool string, paths []string, tier string, ttlSeconds int64) (string, error) {
+	id := fmt.Sprintf("mreq-%d-%s", time.Now().UnixNano(), func() string {
+		b := make([]byte, 6)
+		if _, err := rand.Read(b); err != nil {
+			panic(err)
+		}
+		return hex.EncodeToString(b)
+	}())
+	_, err := s.db.Exec(`INSERT INTO mint_requests(id, service, tool, paths, tier, ttl_seconds, status, created_at)
+		VALUES(?,?,?,?,?,?,'pending',?)`, id, service, tool, strings.Join(paths, ","), tier, ttlSeconds, now())
+	return id, err
+}
+
+func scanMintRequest(row interface{ Scan(...any) error }) (*MintRequest, error) {
+	m := &MintRequest{}
+	var paths string
+	if err := row.Scan(&m.ID, &m.Service, &m.Tool, &paths, &m.Tier, &m.TTLSeconds, &m.Status, &m.CreatedAt, &m.DecidedAt); err != nil {
+		return nil, err
+	}
+	if paths != "" {
+		m.Paths = strings.Split(paths, ",")
+	}
+	return m, nil
+}
+
+const mintRequestCols = `id, service, tool, paths, tier, ttl_seconds, status, created_at, decided_at`
+
+// GetMintRequest loads one mint request.
+func (s *Store) GetMintRequest(id string) (*MintRequest, error) {
+	m, err := scanMintRequest(s.db.QueryRow(`SELECT `+mintRequestCols+` FROM mint_requests WHERE id=?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return m, err
+}
+
+// FindPendingMintRequest returns the pending request identical to the
+// given one, if it exists — re-submitting a pending request returns the
+// original instead of spamming the owner's queue.
+func (s *Store) FindPendingMintRequest(service, tool string, paths []string, tier string, ttlSeconds int64) (*MintRequest, error) {
+	m, err := scanMintRequest(s.db.QueryRow(`SELECT `+mintRequestCols+` FROM mint_requests
+		WHERE service=? AND tool=? AND paths=? AND tier=? AND ttl_seconds=? AND status='pending'`,
+		service, tool, strings.Join(paths, ","), tier, ttlSeconds))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return m, err
+}
+
+// ListMintRequests returns mint requests with the given status ("" = all).
+func (s *Store) ListMintRequests(status string) ([]*MintRequest, error) {
+	q := `SELECT ` + mintRequestCols + ` FROM mint_requests`
+	if status != "" {
+		q += ` WHERE status='` + status + `'`
+	}
+	q += ` ORDER BY created_at`
+	rows, err := s.db.Query(q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*MintRequest
+	for rows.Next() {
+		m, err := scanMintRequest(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// DecideMintRequest records the owner's decision on a pending request.
+func (s *Store) DecideMintRequest(id string, approve bool) error {
+	status := "denied"
+	if approve {
+		status = "approved"
+	}
+	res, err := s.db.Exec(`UPDATE mint_requests SET status=?, decided_at=? WHERE id=? AND status='pending'`,
+		status, now(), id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("mint request %s is not pending", id)
+	}
+	return nil
+}
+
+// SetMintRequestStatus moves a request to a terminal bookkeeping state
+// (issued / expired).
+func (s *Store) SetMintRequestStatus(id, status string) error {
+	_, err := s.db.Exec(`UPDATE mint_requests SET status=? WHERE id=?`, status, id)
+	return err
 }
 
 // NormalizePath cleans a wiki path: no leading slash, no empty segments,

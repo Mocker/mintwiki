@@ -65,7 +65,7 @@ POST /v1/tokens   Authorization: Bearer <service credential>
 
 The gates, checked in order: credential known → service not revoked → requested paths **within the service's ceiling** (a subset check — a service can narrow its scope, never widen it) → tier allowed for this service → TTL within both the service cap and wiki policy. Requests inside the ceiling are issued automatically, no human involved; anything outside is denied and receipted. This is the standard exchange pattern (OAuth 2.0 token exchange, AWS STS): the sensitive credential never authorizes an edit itself — it only authenticates its holder to the minter, and the tokens it buys are scoped, short-lived, and revocable per-jti. Revoking the service credential (`service revoke`) cuts off all future exchanges; already-issued tokens still die at their short expiry or by jti.
 
-Designed next step: requests *above* a ceiling escalate to an owner-approval queue instead of a flat denial — the request is worthless until approved, so submitting one needs no trust, and the human gate appears exactly where the envelope ends.
+Requests *above* a ceiling are not flatly denied — they **escalate to the owner's approval queue**. The exchange answers `202` with a request ID; the service polls `GET /v1/tokens/<request-id>` with its credential. The owner reviews with `mintwiki mint-requests` and decides with `approve-request` / `deny-request`. On approval, the token is minted *at pickup* (TTL counts from pickup, nothing sensitive is stored against the request) and delivered exactly once. A request is worthless until approved, so submitting one needs no trust — and the human gate appears exactly where the envelope ends, which is where it belongs. Pending requests expire after 24 hours; re-submitting an identical pending request returns the original instead of spamming the queue.
 
 Backup is copying the data directory. Moving the wiki is copying the data directory.
 
@@ -80,7 +80,7 @@ bash scripts/demo.sh
 ## Layout
 
 ```
-cmd/mintwiki/     CLI: init | serve | build | mint | revoke | service | proposals | accept | verify-receipts
+cmd/mintwiki/     CLI: init | serve | build | mint | revoke | service | mint-requests | approve-request | deny-request | proposals | accept | verify-receipts
 internal/store/   content-addressed .md revisions + SQLite manifest & CAS heads + pages/ mirror + service registry
 internal/token/   mint / verify / scope matching (single-purpose HMAC secret)
 internal/policy/  local policy file (TTL caps), checked at request time

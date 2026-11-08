@@ -27,6 +27,7 @@ type Entry struct {
 	BeforeVer    int64  `json:"before_version"`
 	AfterVer     int64  `json:"after_version"`
 	ProposalID   string `json:"proposal_id,omitempty"`
+	RequestID    string `json:"request_id,omitempty"`
 	PrevHash     string `json:"prev_hash"`
 	Hash         string `json:"hash"`
 }

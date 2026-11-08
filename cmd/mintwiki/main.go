@@ -11,6 +11,9 @@
 //	mintwiki service add --data DIR --name anna --ceiling /projects/** --tiers allow --max-ttl 30m
 //	mintwiki service list --data DIR
 //	mintwiki service revoke --data DIR --name anna
+//	mintwiki mint-requests --data DIR
+//	mintwiki approve-request --data DIR --id ID
+//	mintwiki deny-request --data DIR --id ID
 //	mintwiki proposals --data DIR
 //	mintwiki accept --data DIR --proposal ID
 //	mintwiki verify-receipts --data DIR
@@ -345,6 +348,66 @@ func cmdService(args []string) {
 	}
 }
 
+func cmdMintRequests(args []string) {
+	fs := flag.NewFlagSet("mint-requests", flag.ExitOnError)
+	data := dataFlag(fs)
+	fs.Parse(args)
+	st, _, _, _, err := openAll(*data)
+	if err != nil {
+		fatal(err)
+	}
+	defer st.Close()
+	reqs, err := st.ListMintRequests("pending")
+	if err != nil {
+		fatal(err)
+	}
+	if len(reqs) == 0 {
+		fmt.Println("no pending mint requests")
+		return
+	}
+	for _, m := range reqs {
+		fmt.Printf("%s  service=%s  scope=%s:%s  tier=%s  ttl=%ds  requested %s\n",
+			m.ID, m.Service, m.Tool, strings.Join(m.Paths, ","), m.Tier, m.TTLSeconds, m.CreatedAt)
+	}
+}
+
+func cmdDecideRequest(args []string, approve bool) {
+	verb := "deny-request"
+	if approve {
+		verb = "approve-request"
+	}
+	fs := flag.NewFlagSet(verb, flag.ExitOnError)
+	data := dataFlag(fs)
+	id := fs.String("id", "", "mint request id")
+	fs.Parse(args)
+	if *id == "" {
+		fatal(fmt.Errorf("--id is required"))
+	}
+	st, rl, _, _, err := openAll(*data)
+	if err != nil {
+		fatal(err)
+	}
+	defer st.Close()
+	m, err := st.GetMintRequest(*id)
+	if err != nil {
+		fatal(err)
+	}
+	if err := st.DecideMintRequest(*id, approve); err != nil {
+		fatal(err)
+	}
+	result := "mint_request_denied"
+	if approve {
+		result = "mint_request_approved"
+	}
+	if err := rl.Append(receipts.Entry{
+		Actor: "owner", Scope: m.Tool + ":" + strings.Join(m.Paths, ","),
+		Result: result, RequestID: m.ID,
+	}); err != nil {
+		fatal(err)
+	}
+	fmt.Printf("%s %s (service %s, scope %s:%s)\n", result, m.ID, m.Service, m.Tool, strings.Join(m.Paths, ","))
+}
+
 func cmdVerifyReceipts(args []string) {
 	fs := flag.NewFlagSet("verify-receipts", flag.ExitOnError)
 	data := dataFlag(fs)
@@ -358,7 +421,7 @@ func cmdVerifyReceipts(args []string) {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: mintwiki <init|serve|build|mint|revoke|service|proposals|accept|verify-receipts> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: mintwiki <init|serve|build|mint|revoke|service|mint-requests|approve-request|deny-request|proposals|accept|verify-receipts> [flags]")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -374,6 +437,12 @@ func main() {
 		cmdRevoke(os.Args[2:])
 	case "service":
 		cmdService(os.Args[2:])
+	case "mint-requests":
+		cmdMintRequests(os.Args[2:])
+	case "approve-request":
+		cmdDecideRequest(os.Args[2:], true)
+	case "deny-request":
+		cmdDecideRequest(os.Args[2:], false)
 	case "proposals":
 		cmdProposals(os.Args[2:])
 	case "accept":
