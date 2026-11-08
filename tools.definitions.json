@@ -1,0 +1,114 @@
+[
+    {
+        "name": "get_page",
+        "description": "Read a wiki page at its current head. Returns the page content plus the exact revision ID and version it was read at, so the caller can cite the revision and detect later movement with one comparison.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Wiki page path, e.g. projects/demo"
+                }
+            },
+            "required": [
+                "path"
+            ]
+        }
+    },
+    {
+        "name": "get_section",
+        "description": "Read one Markdown section of a page: the named heading and everything under it, up to the next heading of the same or higher level. Heading match is case-insensitive; leading # characters in the heading argument are optional.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Wiki page path"
+                },
+                "heading": {
+                    "type": "string",
+                    "description": "Heading text to extract"
+                }
+            },
+            "required": [
+                "path",
+                "heading"
+            ]
+        }
+    },
+    {
+        "name": "search",
+        "description": "Search all pages for a case-insensitive substring, matching page content and paths. Returns matching pages with a snippet around the first content match.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Text to search for"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum results (default 20, cap 50)"
+                }
+            },
+            "required": [
+                "query"
+            ]
+        }
+    },
+    {
+        "name": "backlinks",
+        "description": "List the pages that link to a page, via Markdown links or [[wiki links]]. Useful before renaming or restructuring a page.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Wiki page path to find inbound links for"
+                }
+            },
+            "required": [
+                "path"
+            ]
+        }
+    },
+    {
+        "name": "recent_changes",
+        "description": "List the newest page revisions across the wiki, newest first: revision ID, page path, parent revision, author, and creation time.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum changes to return (default 20, cap 100)"
+                }
+            }
+        }
+    },
+    {
+        "name": "propose_edit",
+        "description": "Propose an edit to a page. Requires a MintWiki edit token (sent as the request's bearer credential) whose scope covers the page; the proposal lands in the owner's queue and the page head does not move until the owner accepts it. expected_version is the head version the edit is based on \u2014 a stale base is rejected as a conflict.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Wiki page path"
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Full replacement Markdown content for the page"
+                },
+                "expected_version": {
+                    "type": "integer",
+                    "description": "Head version the edit is based on (0 for a new page)"
+                }
+            },
+            "required": [
+                "path",
+                "content",
+                "expected_version"
+            ]
+        }
+    }
+]

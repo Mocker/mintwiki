@@ -1,0 +1,25 @@
+{
+  "dependencies": {
+    "marked": "^15.0.0"
+  },
+  "description": "MintWiki Cloudflare runtime: Worker + Durable Object (SQLite) + R2. The Go binary in the repo root is the reference implementation; this package implements the same contract (see ../tools.definitions.json and ../conformance).",
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.8.0",
+    "@cloudflare/workers-types": "^5.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0",
+    "wrangler": "^4.0.0"
+  },
+  "license": "Apache-2.0",
+  "name": "mintwiki-cloudflare",
+  "private": true,
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "seed": "node scripts/seed.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "type": "module",
+  "version": "0.1.0"
+}

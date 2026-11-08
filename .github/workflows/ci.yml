@@ -20,3 +20,28 @@ jobs:
         run: go build ./...
       - name: Acceptance demo
         run: bash scripts/demo.sh
+  cloudflare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - name: Tool definitions drift check
+        run: |
+          go build -o /tmp/mintwiki ./cmd/mintwiki
+          /tmp/mintwiki tools | python3 -m json.tool > /tmp/definitions.generated.json
+          python3 -m json.tool tools.definitions.json > /tmp/definitions.canonical.json
+          diff /tmp/definitions.canonical.json /tmp/definitions.generated.json
+      - name: Install (Cloudflare runtime)
+        working-directory: cloudflare
+        run: npm ci
+      - name: Typecheck
+        working-directory: cloudflare
+        run: npm run typecheck
+      - name: Test (Workers pool)
+        working-directory: cloudflare
+        run: npm test

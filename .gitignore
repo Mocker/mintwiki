@@ -3,3 +3,5 @@
 data/
 *.db
 *.log
+cloudflare/node_modules/
+cloudflare/.wrangler/

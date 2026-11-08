@@ -1,0 +1,24 @@
+{
+  // MintWiki Cloudflare runtime. Deploy with: npx wrangler deploy
+  // Ryan steps at deploy time (M3.5): set the two secrets and attach the
+  // mintwiki.gup.io custom domain (dashboard — the API token Muse holds
+  // has no DNS scope).
+  //   npx wrangler secret put SIGNING_SECRET
+  //   npx wrangler secret put OWNER_ADMIN_TOKEN
+  "name": "mintwiki",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  "durable_objects": {
+    "bindings": [{ "name": "WIKI", "class_name": "WikiDO" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["WikiDO"] }],
+  "r2_buckets": [{ "binding": "BLOB", "bucket_name": "mintwiki-blobs" }],
+  "vars": {
+    // Gates the unauthenticated seed import endpoint (POST
+    // /internal/seed-page). Milestone 3.4 replaces it with the
+    // admin-token surface; until then it exists so a fresh demo can be
+    // seeded, and it must be set to "false" (or removed) on any wiki
+    // whose contents matter.
+    "ALLOW_SEED": "true"
+  }
+}
