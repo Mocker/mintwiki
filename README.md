@@ -109,6 +109,8 @@ Seeding is also a standalone owner command — `mintwiki seed --data DIR --dir d
 
 No Docker? The binary is the deployment: `go build`, `mintwiki init`, `mintwiki seed`, `mintwiki serve`. Backup and migration are copying the data directory.
 
+A second, Cloudflare-native runtime lives in [`cloudflare/`](cloudflare/README.md) (Milestone 3, in progress): a Worker front door, one SQLite-backed Durable Object per wiki, and R2 for revisions and the rendered site — the same contract, held to the Go runtime by the black-box suite in [`conformance/`](conformance/README.md) and the canonical [`tools.definitions.json`](tools.definitions.json). The Go binary stays the reference implementation and the self-hosting story; the Cloudflare runtime is an alternative deployable, not a fork.
+
 ## Acceptance demo
 
 `scripts/demo.sh` runs the acceptance test end-to-end (fresh binary, empty data dir): first edit, stale-writer conflict, out-of-scope rejection, approve-tier propose/accept, revoked token, expired token, the service token exchange and its approval queue, the MCP tools (list, initialize, get_page/get_section/search/backlinks/recent_changes, propose_edit with and without a token), the WebMCP registration file, receipt-chain verification, and a restart from a copied data directory.
@@ -135,6 +137,7 @@ internal/web/     static site serving + POST /edit + POST /v1/tokens (the exchan
 
 - **M2 (done):** agent read surfaces — WebMCP tool registration in the web app and an HTTP MCP server, both generated from one tool definition set (`get_page`, `get_section`, `search`, `backlinks`, `recent_changes`, `propose_edit`).
 - **Deployment (in this repo):** Dockerfile + compose (localhost bind, optional Cloudflare Tunnel connector) and seeded demo content.
+- **M3 (in progress):** the Cloudflare runtime (`cloudflare/`) — Worker + Durable Objects + R2 implementing the same contract, verified by the shared conformance suite.
 - Later: human edit UI with a propose-and-accept queue, private-wiki read tokens, optional maintenance ("dreaming") modules, S3-compatible revision backend.
 
 ## License
