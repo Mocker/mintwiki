@@ -124,6 +124,111 @@ if (cred) {
   console.log("  skip write-lane section (set CONFORMANCE_SERVICE_CRED to run it)");
 }
 
+// --- Agent surface (M3.3 contract: POST /mcp) ---
+{
+  const rpc = async (method, params, auth) => {
+    const res = await fetch(`${base}/mcp`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(auth ? { authorization: `Bearer ${auth}` } : {}),
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+    });
+    return { status: res.status, body: await res.json().catch(() => ({})) };
+  };
+  const callTool = async (name, args, auth) => {
+    const { body } = await rpc("tools/call", { name, arguments: args }, auth);
+    const r = body.result ?? {};
+    return {
+      isError: r.isError === true,
+      text: r.content?.[0]?.text ?? "",
+      json: r.isError ? null : JSON.parse(r.content?.[0]?.text ?? "null"),
+    };
+  };
+
+  const init = await rpc("initialize", { protocolVersion: "2025-03-26" });
+  check(
+    "MCP initialize echoes the protocol version and names the server",
+    init.body.result?.protocolVersion === "2025-03-26" && init.body.result?.serverInfo?.name === "mintwiki",
+  );
+  const disc = await rpc("server/discover", {});
+  check("MCP server/discover answers the same payload", disc.body.result?.serverInfo?.name === "mintwiki");
+
+  const list = await rpc("tools/list");
+  const names = (list.body.result?.tools ?? []).map((t) => t.name);
+  check(
+    "MCP tools/list serves the six shared definitions in order",
+    JSON.stringify(names) ===
+      JSON.stringify(["get_page", "get_section", "search", "backlinks", "recent_changes", "propose_edit"]),
+    `got ${names.join(",")}`,
+  );
+
+  const homePage = await callTool("get_page", { path: "home" });
+  const homeRes = await fetch(`${base}/home`);
+  check(
+    "get_page agrees with the page surface on the head revision",
+    !homePage.isError && homePage.json.revision === homeRes.headers.get("x-mintwiki-revision"),
+  );
+
+  const section = await callTool("get_section", { path: "home", heading: "Start here" });
+  check("get_section extracts the named section", !section.isError && section.json.content.includes("How it works"));
+
+  const search = await callTool("search", { query: "receipt" });
+  check(
+    "search finds the seeded content",
+    !search.isError && search.json.results.some((h) => h.path === "how-it-works"),
+  );
+
+  const backlinks = await callTool("backlinks", { path: "home" });
+  check(
+    "backlinks finds the seeded inbound links",
+    !backlinks.isError &&
+      ["agent-reads", "how-it-works", "sandbox/welcome"].every((p) => backlinks.json.backlinks.includes(p)),
+    `got ${backlinks.json?.backlinks?.join(",")}`,
+  );
+
+  const changes = await callTool("recent_changes", { limit: 50 });
+  check(
+    "recent_changes lists the seeded home revision with its author",
+    !changes.isError && changes.json.changes.some((c) => c.path === "home" && c.author === "seed"),
+  );
+
+  const noTok = await callTool("propose_edit", { path: "home", content: "x", expected_version: 1 });
+  check(
+    "propose_edit without a token is a lane rejection",
+    noTok.isError && noTok.text === "missing bearer token",
+    `got: ${noTok.text}`,
+  );
+
+  const unknown = await rpc("resources/list");
+  check("unknown MCP method is -32601", unknown.body.error?.code === -32601);
+
+  const getMcp = await fetch(`${base}/mcp`);
+  check("GET /mcp is 405", getMcp.status === 405);
+
+  // With the conformance credential, propose_edit lands a proposal
+  // and the head stays put (owner accept is per-runtime, covered by
+  // each runtime's own tests).
+  const cred2 = process.env.CONFORMANCE_SERVICE_CRED;
+  if (cred2) {
+    const exRes = await fetch(`${base}/v1/tokens`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${cred2}`, "content-type": "application/json" },
+      body: JSON.stringify({ paths: ["/conformance/**"], tier: "allow", ttl_seconds: 600 }),
+    });
+    const exBody = await exRes.json().catch(() => ({}));
+    const proposed = await callTool(
+      "propose_edit",
+      { path: "conformance/mcp-probe", content: "# MCP probe\n", expected_version: 0 },
+      exBody.token,
+    );
+    check("propose_edit with a token lands as a proposal", !proposed.isError && proposed.json.status === "proposed");
+    const ghost = await fetch(`${base}/conformance/mcp-probe`);
+    check("the MCP proposal does not move the head", ghost.status === 404);
+  }
+}
+
 // --- Cross-runtime token format (M3.2) ---
 // A token minted by the OTHER runtime (same signing secret) must get
 // PAST signature verification here and be stopped only by the jti
