@@ -52,6 +52,9 @@ func Open(dataDir string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Join(dataDir, "revisions"), 0o755); err != nil {
 		return nil, err
 	}
+	if err := os.MkdirAll(filepath.Join(dataDir, "pages"), 0o755); err != nil {
+		return nil, err
+	}
 	db, err := sql.Open("sqlite", filepath.Join(dataDir, "mintwiki.db"))
 	if err != nil {
 		return nil, err
@@ -101,8 +104,9 @@ func (s *Store) Close() error { return s.db.Close() }
 
 func now() string { return time.Now().UTC().Format(time.RFC3339) }
 
-// WriteRevision stores content as an immutable revision object and returns
-// its content hash. Writing the same content twice is a no-op.
+// WriteRevision stores content as an immutable revision object — a plain
+// Markdown file named by its content hash — and returns the hash.
+// Writing the same content twice is a no-op.
 func (s *Store) WriteRevision(content []byte) (string, error) {
 	sum := sha256.Sum256(content)
 	id := hex.EncodeToString(sum[:])
@@ -110,7 +114,7 @@ func (s *Store) WriteRevision(content []byte) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
-	p := filepath.Join(dir, id)
+	p := filepath.Join(dir, id+".md")
 	if _, err := os.Stat(p); err == nil {
 		return id, nil
 	}
@@ -129,11 +133,33 @@ func (s *Store) ReadRevision(revID string) ([]byte, error) {
 	if len(revID) < 2 {
 		return nil, ErrNotFound
 	}
-	b, err := os.ReadFile(filepath.Join(s.dataDir, "revisions", revID[:2], revID))
+	b, err := os.ReadFile(filepath.Join(s.dataDir, "revisions", revID[:2], revID+".md"))
 	if err != nil {
 		return nil, ErrNotFound
 	}
 	return b, nil
+}
+
+// PageFilePath is where a page's current head lives as a plain Markdown
+// file (data/pages/<path>.md) — readable and editable with any tool.
+func (s *Store) PageFilePath(path string) string {
+	return filepath.Join(s.dataDir, "pages", filepath.FromSlash(path)+".md")
+}
+
+// mirrorHead writes the page's current head content to its .md file.
+// The mirror is a materialized view of the store, kept in step on every
+// head move; the store (revisions + SQLite heads) stays the source of
+// truth and the mirror can always be regenerated from it.
+func (s *Store) mirrorHead(path string, content []byte) error {
+	p := s.PageFilePath(path)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return err
+	}
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, content, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, p)
 }
 
 // GetPage returns the page at its current head.
@@ -228,6 +254,9 @@ func (s *Store) PutPage(path string, content []byte, expectedVersion int64, auth
 	}
 	if err := tx.Commit(); err != nil {
 		return "", 0, curVer, err
+	}
+	if err := s.mirrorHead(path, content); err != nil {
+		return "", 0, curVer, fmt.Errorf("head moved to %s but page mirror failed: %w", revID, err)
 	}
 	return revID, newVersion, curVer, nil
 }

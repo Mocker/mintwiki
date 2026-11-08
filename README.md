@@ -23,7 +23,9 @@ A token is an HMAC-signed JWT carrying:
 
 Every write is checked at request time, in order: signature → expiry → token was minted here → not revoked → scope covers this page → tier → compare-and-swap on the page head. Every attempt — applied, proposed, or rejected — appends a hash-chained audit receipt.
 
-Pages are immutable content-addressed revisions; the only mutable state is one head pointer per page, moved by CAS inside a SQLite transaction. A stale writer gets a conflict and the current head version, never a silent overwrite. Revert = move the head back; history is never rewritten. Every page render names the exact revision it shows.
+Pages are Markdown files, all the way down. Every revision is an immutable `.md` file named by its content hash; each page's current head also lives as a plain `.md` file at `data/pages/<path>.md`, readable (and inspectable) with any tool. The only mutable state is one head pointer per page in SQLite, moved by CAS inside a transaction. A stale writer gets a conflict and the current head version, never a silent overwrite. Revert = move the head back; history is never rewritten.
+
+Viewing is static: the wiki builds to plain HTML (`data/site/`, one `.html` per page plus an index) and the server serves those files — the build is regenerated whenever a head moves, and any static file server can serve the output just as well. Every built page names the exact revision it shows.
 
 ## Quickstart
 
@@ -38,9 +40,12 @@ curl -X POST localhost:8090/edit \
   -H "Authorization: Bearer <token>" \
   -d '{"path":"projects/demo","content":"# Hello","expected_version":0}'
 
-curl localhost:8090/projects/demo        # renders the page + its revision ID
+curl localhost:8090/projects/demo        # serves the built page + its revision ID
+./mintwiki build --data data             # rebuild the static site by hand
 ./mintwiki verify-receipts --data data   # check the audit chain
 ```
+
+The minting question — *what authenticates the minter?* Minting is deliberately **not** a network service: it is a local CLI operation, and its authentication is the operating system — whoever can read the `0600` signing-key file in the data directory can mint, exactly the trust model of an SSH private key. There is no remote mint endpoint to attack. A future module may let agents *request* tokens remotely, but a request would only land in the owner's approval queue; issuance stays local and owner-approved.
 
 Backup is copying the data directory. Moving the wiki is copying the data directory.
 
@@ -55,12 +60,13 @@ bash scripts/demo.sh
 ## Layout
 
 ```
-cmd/mintwiki/     CLI: init | serve | mint | revoke | proposals | accept | verify-receipts
-internal/store/   content-addressed revisions + SQLite manifest & CAS heads
+cmd/mintwiki/     CLI: init | serve | build | mint | revoke | proposals | accept | verify-receipts
+internal/store/   content-addressed .md revisions + SQLite manifest & CAS heads + pages/ mirror
 internal/token/   mint / verify / scope matching (single-purpose HMAC secret)
 internal/policy/  local policy file (TTL caps), checked at request time
 internal/receipts/ append-only hash-chained audit log
-internal/web/     page rendering + POST /edit
+internal/site/    static HTML builder (index + one .html per page)
+internal/web/     static site serving + POST /edit
 ```
 
 ## Roadmap

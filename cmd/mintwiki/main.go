@@ -5,6 +5,7 @@
 //
 //	mintwiki init   --data DIR
 //	mintwiki serve  --data DIR --addr :8090
+//	mintwiki build  --data DIR [--out DIR]
 //	mintwiki mint   --data DIR --actor NAME --paths /projects/** --tier allow --ttl 30m
 //	mintwiki revoke --data DIR --jti JTI
 //	mintwiki proposals --data DIR
@@ -25,6 +26,7 @@ import (
 
 	"github.com/Mocker/mintwiki/internal/policy"
 	"github.com/Mocker/mintwiki/internal/receipts"
+	"github.com/Mocker/mintwiki/internal/site"
 	"github.com/Mocker/mintwiki/internal/store"
 	"github.com/Mocker/mintwiki/internal/token"
 	"github.com/Mocker/mintwiki/internal/web"
@@ -105,6 +107,8 @@ func cmdInit(args []string) {
 	fmt.Println("initialized data directory:", *data)
 }
 
+func siteDir(data string) string { return filepath.Join(data, "site") }
+
 func cmdServe(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	data := dataFlag(fs)
@@ -118,8 +122,32 @@ func cmdServe(args []string) {
 	if err := policy.WriteDefault(filepath.Join(*data, "policy.json")); err != nil {
 		fatal(err)
 	}
+	if _, err := site.Build(st, siteDir(*data)); err != nil {
+		fatal(err)
+	}
 	fmt.Println("mintwiki serving on", *addr, "data:", *data)
-	fatal(http.ListenAndServe(*addr, web.New(st, rl, key).Handler()))
+	fatal(http.ListenAndServe(*addr, web.New(st, rl, key, siteDir(*data)).Handler()))
+}
+
+func cmdBuild(args []string) {
+	fs := flag.NewFlagSet("build", flag.ExitOnError)
+	data := dataFlag(fs)
+	out := fs.String("out", "", "output directory (default: <data>/site)")
+	fs.Parse(args)
+	st, _, _, _, err := openAll(*data)
+	if err != nil {
+		fatal(err)
+	}
+	defer st.Close()
+	target := *out
+	if target == "" {
+		target = siteDir(*data)
+	}
+	n, err := site.Build(st, target)
+	if err != nil {
+		fatal(err)
+	}
+	fmt.Printf("built %d page(s) into %s\n", n, target)
 }
 
 func cmdMint(args []string) {
@@ -225,6 +253,11 @@ func cmdAccept(args []string) {
 	}); err != nil {
 		fatal(err)
 	}
+	// The head moved: rebuild the static site so any running server (it
+	// serves files from disk) shows the accepted page immediately.
+	if _, err := site.Build(st, siteDir(*data)); err != nil {
+		fatal(err)
+	}
 	fmt.Printf("accepted %s: %s now at version %d\n", p.ID, p.PagePath, newVer)
 }
 
@@ -241,7 +274,7 @@ func cmdVerifyReceipts(args []string) {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: mintwiki <init|serve|mint|revoke|proposals|accept|verify-receipts> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: mintwiki <init|serve|build|mint|revoke|proposals|accept|verify-receipts> [flags]")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -249,6 +282,8 @@ func main() {
 		cmdInit(os.Args[2:])
 	case "serve":
 		cmdServe(os.Args[2:])
+	case "build":
+		cmdBuild(os.Args[2:])
 	case "mint":
 		cmdMint(os.Args[2:])
 	case "revoke":

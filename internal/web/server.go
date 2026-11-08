@@ -1,21 +1,20 @@
 // Package web is MintWiki's minimal HTTP surface for Milestone 1:
-// read a page (rendered, with its revision ID), list pages, and the
-// token-gated edit endpoint. Reads are open (public wiki semantics);
-// every write runs the full token lane.
+// serve the statically built site (pages are Markdown files, built to
+// HTML), and the token-gated edit endpoint. Reads are open (public wiki
+// semantics) and are plain static files; every write runs the full token
+// lane and triggers a rebuild of the static site.
 package web
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"html"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 
-	"github.com/yuin/goldmark"
-
 	"github.com/Mocker/mintwiki/internal/receipts"
+	"github.com/Mocker/mintwiki/internal/site"
 	"github.com/Mocker/mintwiki/internal/store"
 	"github.com/Mocker/mintwiki/internal/token"
 )
@@ -24,10 +23,11 @@ type Server struct {
 	Store    *store.Store
 	Receipts *receipts.Log
 	Key      []byte
+	SiteDir  string
 }
 
-func New(st *store.Store, rl *receipts.Log, key []byte) *Server {
-	return &Server{Store: st, Receipts: rl, Key: key}
+func New(st *store.Store, rl *receipts.Log, key []byte, siteDir string) *Server {
+	return &Server{Store: st, Receipts: rl, Key: key, SiteDir: siteDir}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -38,20 +38,25 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
+// rebuild regenerates the static site from the store. The store is the
+// source of truth; the site is a view, so a rebuild failure never fails a
+// write that already landed — the next build (or `mintwiki build`) heals it.
+func (s *Server) rebuild() {
+	_, _ = site.Build(s.Store, s.SiteDir)
+}
+
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	pages, err := s.Store.ListPages()
+	b, err := os.ReadFile(filepath.Join(s.SiteDir, "index.html"))
 	if err != nil {
-		http.Error(w, "store error", http.StatusInternalServerError)
-		return
+		s.rebuild()
+		b, err = os.ReadFile(filepath.Join(s.SiteDir, "index.html"))
+		if err != nil {
+			http.Error(w, "site not built", http.StatusInternalServerError)
+			return
+		}
 	}
-	var b strings.Builder
-	b.WriteString("<!doctype html><title>MintWiki</title><h1>MintWiki</h1><ul>")
-	for _, p := range pages {
-		fmt.Fprintf(&b, `<li><a href="/%s">%s</a></li>`, html.EscapeString(p), html.EscapeString(p))
-	}
-	b.WriteString("</ul>")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, b.String())
+	_, _ = w.Write(b)
 }
 
 func (s *Server) handlePage(w http.ResponseWriter, r *http.Request) {
@@ -69,15 +74,21 @@ func (s *Server) handlePage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "store error", http.StatusInternalServerError)
 		return
 	}
-	var buf bytes.Buffer
-	if err := goldmark.Convert(page.Content, &buf); err != nil {
-		http.Error(w, "render error", http.StatusInternalServerError)
-		return
+	file := filepath.Join(s.SiteDir, filepath.FromSlash(path)+".html")
+	b, err := os.ReadFile(file)
+	if err != nil {
+		// Built file missing (e.g. the wiki was edited while this server
+		// was down): rebuild once and retry.
+		s.rebuild()
+		b, err = os.ReadFile(file)
+		if err != nil {
+			http.Error(w, "site not built", http.StatusInternalServerError)
+			return
+		}
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("X-MintWiki-Revision", page.RevID)
-	fmt.Fprintf(w, "<!doctype html><title>%s — MintWiki</title><article>%s</article><footer><small>revision %s · version %d</small></footer>",
-		html.EscapeString(path), buf.String(), page.RevID, page.Version)
+	_, _ = w.Write(b)
 }
 
 type editRequest struct {
@@ -199,5 +210,6 @@ func (s *Server) handleEdit(w http.ResponseWriter, r *http.Request) {
 		Actor: claims.Actor, TokenJTI: claims.ID, Scope: claims.ScopeString(),
 		Page: path, Result: "applied", RevID: revID, BeforeVer: before, AfterVer: newVer,
 	})
+	s.rebuild()
 	writeJSON(w, http.StatusOK, editResponse{Status: "applied", Revision: revID, Version: newVer})
 }

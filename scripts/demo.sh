@@ -46,6 +46,8 @@ REV1=$(echo "$body" | json_get revision)
 page=$(curl -s "$BASE/projects/demo")
 echo "$page" | grep -q "Demo page" && echo "PASS: page renders its content" && PASS=$((PASS+1)) || { echo "FAIL: page render"; FAIL=$((FAIL+1)); }
 echo "$page" | grep -q "$REV1" && echo "PASS: render names revision R1" && PASS=$((PASS+1)) || { echo "FAIL: revision not in render"; FAIL=$((FAIL+1)); }
+grep -q "# Demo page" "$DATA/pages/projects/demo.md" && echo "PASS: page head lives as a plain .md file" && PASS=$((PASS+1)) || { echo "FAIL: .md mirror missing"; FAIL=$((FAIL+1)); }
+grep -q "Demo page" "$DATA/site/projects/demo.html" && echo "PASS: static HTML built for the page" && PASS=$((PASS+1)) || { echo "FAIL: static html missing"; FAIL=$((FAIL+1)); }
 
 echo "== step 3: stale writer conflicts =="
 resp=$(edit "$TOK" projects/demo "# stale overwrite" 0); code=$(echo "$resp" | tail -1)
@@ -70,6 +72,7 @@ echo "$page" | grep -q "Demo page v2" && { echo "FAIL: proposal moved the head";
 "$BIN" accept --data "$DATA" --proposal "$PROP" >/dev/null || { echo "FAIL: accept command"; FAIL=$((FAIL+1)); }
 page=$(curl -s "$BASE/projects/demo")
 echo "$page" | grep -q "Demo page v2" && echo "PASS: accepted proposal moved the head" && PASS=$((PASS+1)) || { echo "FAIL: accepted content not live"; FAIL=$((FAIL+1)); }
+grep -q "Demo page v2" "$DATA/pages/projects/demo.md" && echo "PASS: .md mirror follows the accepted head" && PASS=$((PASS+1)) || { echo "FAIL: .md mirror stale after accept"; FAIL=$((FAIL+1)); }
 
 echo "== step 6: revoked and expired tokens rejected =="
 MINT_OUT=$("$BIN" mint --data "$DATA" --actor agent-3 --paths /projects/** --tier allow)
