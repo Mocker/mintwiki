@@ -12,7 +12,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/Mocker/mintwiki/internal/policy"
 	"github.com/Mocker/mintwiki/internal/receipts"
 	"github.com/Mocker/mintwiki/internal/site"
 	"github.com/Mocker/mintwiki/internal/store"
@@ -24,15 +26,17 @@ type Server struct {
 	Receipts *receipts.Log
 	Key      []byte
 	SiteDir  string
+	Policy   policy.Policy
 }
 
-func New(st *store.Store, rl *receipts.Log, key []byte, siteDir string) *Server {
-	return &Server{Store: st, Receipts: rl, Key: key, SiteDir: siteDir}
+func New(st *store.Store, rl *receipts.Log, key []byte, siteDir string, pol policy.Policy) *Server {
+	return &Server{Store: st, Receipts: rl, Key: key, SiteDir: siteDir, Policy: pol}
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /edit", s.handleEdit)
+	mux.HandleFunc("POST /v1/tokens", s.handleMint)
 	mux.HandleFunc("GET /{$}", s.handleIndex)
 	mux.HandleFunc("GET /{path...}", s.handlePage)
 	return mux
@@ -212,4 +216,116 @@ func (s *Server) handleEdit(w http.ResponseWriter, r *http.Request) {
 	})
 	s.rebuild()
 	writeJSON(w, http.StatusOK, editResponse{Status: "applied", Revision: revID, Version: newVer})
+}
+
+type mintRequest struct {
+	Tool       string   `json:"tool"`
+	Paths      []string `json:"paths"`
+	Tier       string   `json:"tier"`
+	TTLSeconds int64    `json:"ttl_seconds"`
+}
+
+type mintResponse struct {
+	Token     string `json:"token,omitempty"`
+	JTI       string `json:"jti,omitempty"`
+	ExpiresAt string `json:"expires_at,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+// handleMint is the token exchange: a service presents its long-lived
+// credential and receives a short-lived edit token. The gates, in order:
+// credential known → service not revoked → requested scope within the
+// service's ceiling → tier allowed for this service → TTL within both
+// the service cap and wiki policy. Routine requests inside the ceiling
+// are issued automatically — no human in the loop; anything outside is
+// denied and receipted. (Escalation to an owner-approval queue is the
+// designed next step, not a silent widening.)
+func (s *Server) handleMint(w http.ResponseWriter, r *http.Request) {
+	deny := func(code int, svc *store.Service, scopeDesc, reason string) {
+		e := receipts.Entry{Result: "mint_denied", Reason: reason, Scope: scopeDesc}
+		if svc != nil {
+			e.Actor = svc.Name
+		}
+		_ = s.Receipts.Append(e)
+		writeJSON(w, code, mintResponse{Error: reason})
+	}
+
+	auth := r.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, "Bearer ") {
+		deny(http.StatusUnauthorized, nil, "", "missing service credential")
+		return
+	}
+	svc, err := s.Store.GetServiceByHash(store.HashCredential(strings.TrimPrefix(auth, "Bearer ")))
+	if errors.Is(err, store.ErrNotFound) {
+		deny(http.StatusUnauthorized, nil, "", "unknown service credential")
+		return
+	}
+	if err != nil {
+		deny(http.StatusInternalServerError, nil, "", "store error")
+		return
+	}
+	if svc.Revoked {
+		deny(http.StatusUnauthorized, svc, "", "service credential revoked")
+		return
+	}
+
+	var req mintRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		deny(http.StatusBadRequest, svc, "", "bad JSON body")
+		return
+	}
+	if req.Tool == "" {
+		req.Tool = token.ToolEdit
+	}
+	scopeDesc := req.Tool + ":" + strings.Join(req.Paths, ",")
+	if req.Tool != token.ToolEdit {
+		deny(http.StatusForbidden, svc, scopeDesc, "unknown tool")
+		return
+	}
+	if len(req.Paths) == 0 || !token.WithinCeiling(svc.CeilingPaths, req.Paths) {
+		deny(http.StatusForbidden, svc, scopeDesc, "requested paths exceed service ceiling")
+		return
+	}
+	if req.Tier == "" {
+		req.Tier = token.TierAllow
+	}
+	tierOK := false
+	for _, t := range svc.Tiers {
+		if t == req.Tier {
+			tierOK = true
+		}
+	}
+	if !tierOK {
+		deny(http.StatusForbidden, svc, scopeDesc, "tier not allowed for this service")
+		return
+	}
+	ttl := s.Policy.DefaultTTL()
+	if req.TTLSeconds > 0 {
+		ttl = time.Duration(req.TTLSeconds) * time.Second
+	}
+	if ttl > time.Duration(svc.MaxTTLSeconds)*time.Second {
+		deny(http.StatusForbidden, svc, scopeDesc, "ttl exceeds service cap")
+		return
+	}
+	if err := s.Policy.CheckTTL(ttl); err != nil {
+		deny(http.StatusForbidden, svc, scopeDesc, err.Error())
+		return
+	}
+
+	signed, claims, err := token.Mint(s.Key, svc.Name, req.Tool, req.Paths, req.Tier, ttl)
+	if err != nil {
+		deny(http.StatusBadRequest, svc, scopeDesc, err.Error())
+		return
+	}
+	if err := s.Store.RegisterToken(claims.ID, claims.ScopeString(), claims.Tier, claims.ExpiresAt.Time.Unix()); err != nil {
+		deny(http.StatusInternalServerError, svc, scopeDesc, "store error")
+		return
+	}
+	_ = s.Receipts.Append(receipts.Entry{
+		Actor: svc.Name, TokenJTI: claims.ID, Scope: claims.ScopeString(), Result: "minted",
+	})
+	writeJSON(w, http.StatusOK, mintResponse{
+		Token: signed, JTI: claims.ID,
+		ExpiresAt: claims.ExpiresAt.Time.UTC().Format(time.RFC3339),
+	})
 }

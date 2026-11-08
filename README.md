@@ -45,7 +45,27 @@ curl localhost:8090/projects/demo        # serves the built page + its revision 
 ./mintwiki verify-receipts --data data   # check the audit chain
 ```
 
-The minting question — *what authenticates the minter?* Minting is deliberately **not** a network service: it is a local CLI operation, and its authentication is the operating system — whoever can read the `0600` signing-key file in the data directory can mint, exactly the trust model of an SSH private key. There is no remote mint endpoint to attack. A future module may let agents *request* tokens remotely, but a request would only land in the owner's approval queue; issuance stays local and owner-approved.
+The minting question — *what authenticates the minter?* The root stays local: the signing key is a `0600` file in the data directory, and the owner's CLI mints with it directly (the SSH-key trust model). But editors never touch that path day-to-day — it would put a human in the loop for every edit. Instead, day-to-day issuance is a **token exchange**:
+
+## Service credentials & the token exchange
+
+Each agent runtime / service gets a long-lived **service credential** with a **scope ceiling** set by the owner:
+
+```
+mintwiki service add --name anna --ceiling /projects/**,/notes/** --tiers allow --max-ttl 30m
+```
+
+The credential is shown exactly once; only its SHA-256 hash is stored. The service keeps it in its own secret store and exchanges it at the mint endpoint for short-lived edit tokens:
+
+```
+POST /v1/tokens   Authorization: Bearer <service credential>
+{"paths": ["/projects/**"], "tier": "allow", "ttl_seconds": 600}
+→ {"token": "<short-lived JWT>", "jti": "...", "expires_at": "..."}
+```
+
+The gates, checked in order: credential known → service not revoked → requested paths **within the service's ceiling** (a subset check — a service can narrow its scope, never widen it) → tier allowed for this service → TTL within both the service cap and wiki policy. Requests inside the ceiling are issued automatically, no human involved; anything outside is denied and receipted. This is the standard exchange pattern (OAuth 2.0 token exchange, AWS STS): the sensitive credential never authorizes an edit itself — it only authenticates its holder to the minter, and the tokens it buys are scoped, short-lived, and revocable per-jti. Revoking the service credential (`service revoke`) cuts off all future exchanges; already-issued tokens still die at their short expiry or by jti.
+
+Designed next step: requests *above* a ceiling escalate to an owner-approval queue instead of a flat denial — the request is worthless until approved, so submitting one needs no trust, and the human gate appears exactly where the envelope ends.
 
 Backup is copying the data directory. Moving the wiki is copying the data directory.
 
@@ -60,13 +80,13 @@ bash scripts/demo.sh
 ## Layout
 
 ```
-cmd/mintwiki/     CLI: init | serve | build | mint | revoke | proposals | accept | verify-receipts
-internal/store/   content-addressed .md revisions + SQLite manifest & CAS heads + pages/ mirror
+cmd/mintwiki/     CLI: init | serve | build | mint | revoke | service | proposals | accept | verify-receipts
+internal/store/   content-addressed .md revisions + SQLite manifest & CAS heads + pages/ mirror + service registry
 internal/token/   mint / verify / scope matching (single-purpose HMAC secret)
 internal/policy/  local policy file (TTL caps), checked at request time
 internal/receipts/ append-only hash-chained audit log
 internal/site/    static HTML builder (index + one .html per page)
-internal/web/     static site serving + POST /edit
+internal/web/     static site serving + POST /edit + POST /v1/tokens (the exchange)
 ```
 
 ## Roadmap

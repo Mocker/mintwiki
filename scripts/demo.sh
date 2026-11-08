@@ -86,6 +86,23 @@ sleep 2
 resp=$(edit "$TOK4" projects/demo "# expired write" 2); code=$(echo "$resp" | tail -1)
 ok "$code" "401" "expired token rejected with 401"
 
+echo "== step 6b: service credential exchanges for a short-lived token =="
+SVC_OUT=$("$BIN" service add --data "$DATA" --name demo-agent --ceiling /projects/** --tiers allow --max-ttl 30m)
+SVC_CRED=$(echo "$SVC_OUT" | sed -n 's/^credential: //p')
+[ -n "$SVC_CRED" ] && echo "PASS: service registered, credential shown once" && PASS=$((PASS+1)) || { echo "FAIL: service add"; FAIL=$((FAIL+1)); }
+mint_call() { # cred body -> "code body"
+  curl -s -w $'\n%{http_code}' -X POST "$BASE/v1/tokens" -H "Authorization: Bearer $1" -H 'Content-Type: application/json' -d "$2"
+}
+resp=$(mint_call "$SVC_CRED" '{"paths":["/projects/**"],"ttl_seconds":600}'); code=$(echo "$resp" | tail -1); body=$(echo "$resp" | head -n -1)
+ok "$code" "200" "exchange inside ceiling issues a token"
+XTOK=$(echo "$body" | json_get token)
+resp=$(edit "$XTOK" projects/demo "# Demo page v2 (service edit)" 2); code=$(echo "$resp" | tail -1)
+ok "$code" "200" "exchanged token edits the page"
+resp=$(mint_call "$SVC_CRED" '{"paths":["/private/**"]}'); code=$(echo "$resp" | tail -1)
+ok "$code" "403" "exchange above ceiling denied with 403"
+resp=$(mint_call "mwsvc_bogus" '{"paths":["/projects/**"]}'); code=$(echo "$resp" | tail -1)
+ok "$code" "401" "unknown service credential rejected with 401"
+
 echo "== step 7: receipts verify; restart + data-dir copy renders the same page =="
 out=$("$BIN" verify-receipts --data "$DATA")
 echo "$out" | grep -q "receipt chain OK" && echo "PASS: $out" && PASS=$((PASS+1)) || { echo "FAIL: receipts: $out"; FAIL=$((FAIL+1)); }

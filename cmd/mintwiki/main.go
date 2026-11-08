@@ -8,6 +8,9 @@
 //	mintwiki build  --data DIR [--out DIR]
 //	mintwiki mint   --data DIR --actor NAME --paths /projects/** --tier allow --ttl 30m
 //	mintwiki revoke --data DIR --jti JTI
+//	mintwiki service add --data DIR --name anna --ceiling /projects/** --tiers allow --max-ttl 30m
+//	mintwiki service list --data DIR
+//	mintwiki service revoke --data DIR --name anna
 //	mintwiki proposals --data DIR
 //	mintwiki accept --data DIR --proposal ID
 //	mintwiki verify-receipts --data DIR
@@ -114,7 +117,7 @@ func cmdServe(args []string) {
 	data := dataFlag(fs)
 	addr := fs.String("addr", ":8090", "listen address")
 	fs.Parse(args)
-	st, rl, key, _, err := openAll(*data)
+	st, rl, key, pol, err := openAll(*data)
 	if err != nil {
 		fatal(err)
 	}
@@ -126,7 +129,7 @@ func cmdServe(args []string) {
 		fatal(err)
 	}
 	fmt.Println("mintwiki serving on", *addr, "data:", *data)
-	fatal(http.ListenAndServe(*addr, web.New(st, rl, key, siteDir(*data)).Handler()))
+	fatal(http.ListenAndServe(*addr, web.New(st, rl, key, siteDir(*data), pol).Handler()))
 }
 
 func cmdBuild(args []string) {
@@ -261,6 +264,87 @@ func cmdAccept(args []string) {
 	fmt.Printf("accepted %s: %s now at version %d\n", p.ID, p.PagePath, newVer)
 }
 
+func cmdService(args []string) {
+	if len(args) < 1 {
+		fatal(fmt.Errorf("usage: mintwiki service <add|list|revoke> [flags]"))
+	}
+	switch args[0] {
+	case "add":
+		fs := flag.NewFlagSet("service add", flag.ExitOnError)
+		data := dataFlag(fs)
+		name := fs.String("name", "", "service name (e.g. anna)")
+		ceiling := fs.String("ceiling", "", "comma-separated path patterns the service may ever request, e.g. /projects/**")
+		tiers := fs.String("tiers", token.TierAllow, "comma-separated tiers the service may request: allow, approve")
+		maxTTL := fs.Duration("max-ttl", 30*time.Minute, "maximum token lifetime this service may request")
+		fs.Parse(args[1:])
+		if *name == "" || *ceiling == "" {
+			fatal(fmt.Errorf("--name and --ceiling are required"))
+		}
+		st, _, _, _, err := openAll(*data)
+		if err != nil {
+			fatal(err)
+		}
+		defer st.Close()
+		raw := make([]byte, 32)
+		if _, err := rand.Read(raw); err != nil {
+			fatal(err)
+		}
+		cred := "mwsvc_" + hex.EncodeToString(raw)
+		if err := st.RegisterService(*name, store.HashCredential(cred),
+			strings.Split(*ceiling, ","), strings.Split(*tiers, ","),
+			int64(maxTTL.Seconds())); err != nil {
+			fatal(err)
+		}
+		fmt.Println("service:", *name)
+		fmt.Println("credential:", cred)
+		fmt.Println("STORE THIS CREDENTIAL NOW — it is shown once; only its hash is kept.")
+	case "list":
+		fs := flag.NewFlagSet("service list", flag.ExitOnError)
+		data := dataFlag(fs)
+		fs.Parse(args[1:])
+		st, _, _, _, err := openAll(*data)
+		if err != nil {
+			fatal(err)
+		}
+		defer st.Close()
+		svcs, err := st.ListServices()
+		if err != nil {
+			fatal(err)
+		}
+		if len(svcs) == 0 {
+			fmt.Println("no services registered")
+			return
+		}
+		for _, svc := range svcs {
+			state := "active"
+			if svc.Revoked {
+				state = "REVOKED"
+			}
+			fmt.Printf("%s  ceiling=%s  tiers=%s  max_ttl=%ds  %s\n",
+				svc.Name, strings.Join(svc.CeilingPaths, ","), strings.Join(svc.Tiers, ","), svc.MaxTTLSeconds, state)
+		}
+	case "revoke":
+		fs := flag.NewFlagSet("service revoke", flag.ExitOnError)
+		data := dataFlag(fs)
+		name := fs.String("name", "", "service name to revoke")
+		fs.Parse(args[1:])
+		if *name == "" {
+			fatal(fmt.Errorf("--name is required"))
+		}
+		st, _, _, _, err := openAll(*data)
+		if err != nil {
+			fatal(err)
+		}
+		defer st.Close()
+		if err := st.RevokeService(*name); err != nil {
+			fatal(err)
+		}
+		fmt.Println("service revoked:", *name)
+	default:
+		fatal(fmt.Errorf("unknown service subcommand: %s", args[0]))
+	}
+}
+
 func cmdVerifyReceipts(args []string) {
 	fs := flag.NewFlagSet("verify-receipts", flag.ExitOnError)
 	data := dataFlag(fs)
@@ -274,7 +358,7 @@ func cmdVerifyReceipts(args []string) {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: mintwiki <init|serve|build|mint|revoke|proposals|accept|verify-receipts> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: mintwiki <init|serve|build|mint|revoke|service|proposals|accept|verify-receipts> [flags]")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -288,6 +372,8 @@ func main() {
 		cmdMint(os.Args[2:])
 	case "revoke":
 		cmdRevoke(os.Args[2:])
+	case "service":
+		cmdService(os.Args[2:])
 	case "proposals":
 		cmdProposals(os.Args[2:])
 	case "accept":

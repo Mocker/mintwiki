@@ -93,6 +93,15 @@ CREATE TABLE IF NOT EXISTS proposals (
   status TEXT NOT NULL DEFAULT 'pending',
   token_jti TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS services (
+  name TEXT PRIMARY KEY,
+  cred_hash TEXT NOT NULL,
+  ceiling_paths TEXT NOT NULL DEFAULT '',
+  tiers TEXT NOT NULL DEFAULT '',
+  max_ttl_seconds INTEGER NOT NULL DEFAULT 1800,
+  revoked INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
 );`)
 	if err != nil {
 		return nil, err
@@ -390,6 +399,93 @@ func (s *Store) IsRegistered(jti string) (bool, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM tokens WHERE jti=?`, jti).Scan(&n)
 	return n > 0, err
+}
+
+// HashCredential is how service credentials are stored: the raw
+// credential is shown to the owner exactly once (at `service add`) and
+// never persisted; only this SHA-256 hash is.
+func HashCredential(cred string) string {
+	sum := sha256.Sum256([]byte(cred))
+	return hex.EncodeToString(sum[:])
+}
+
+// Service is a registered minting client: a long-lived credential (only
+// its hash is stored) that the service exchanges at the mint endpoint for
+// short-lived edit tokens, bounded by a scope ceiling the owner set.
+type Service struct {
+	Name           string
+	CredHash       string
+	CeilingPaths   []string
+	Tiers          []string
+	MaxTTLSeconds  int64
+	Revoked        bool
+	CreatedAt      string
+}
+
+// RegisterService adds (or replaces) a service credential + ceiling.
+func (s *Store) RegisterService(name, credHash string, ceilingPaths, tiers []string, maxTTLSeconds int64) error {
+	_, err := s.db.Exec(`INSERT OR REPLACE INTO services(name, cred_hash, ceiling_paths, tiers, max_ttl_seconds, revoked, created_at)
+		VALUES(?,?,?,?,?,0,?)`, name, credHash, strings.Join(ceilingPaths, ","), strings.Join(tiers, ","), maxTTLSeconds, now())
+	return err
+}
+
+// GetServiceByHash looks a service up by its credential hash (the raw
+// credential is never stored).
+func (s *Store) GetServiceByHash(credHash string) (*Service, error) {
+	svc := &Service{}
+	var paths, tiers string
+	var revoked int
+	err := s.db.QueryRow(`SELECT name, cred_hash, ceiling_paths, tiers, max_ttl_seconds, revoked, created_at
+		FROM services WHERE cred_hash=?`, credHash).
+		Scan(&svc.Name, &svc.CredHash, &paths, &tiers, &svc.MaxTTLSeconds, &revoked, &svc.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if paths != "" {
+		svc.CeilingPaths = strings.Split(paths, ",")
+	}
+	if tiers != "" {
+		svc.Tiers = strings.Split(tiers, ",")
+	}
+	svc.Revoked = revoked == 1
+	return svc, nil
+}
+
+// RevokeService disables a service credential immediately.
+func (s *Store) RevokeService(name string) error {
+	_, err := s.db.Exec(`UPDATE services SET revoked=1 WHERE name=?`, name)
+	return err
+}
+
+// ListServices returns all registered services (hashes not included in
+// String output by callers; the struct is for internal use).
+func (s *Store) ListServices() ([]*Service, error) {
+	rows, err := s.db.Query(`SELECT name, cred_hash, ceiling_paths, tiers, max_ttl_seconds, revoked, created_at FROM services ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Service
+	for rows.Next() {
+		svc := &Service{}
+		var paths, tiers string
+		var revoked int
+		if err := rows.Scan(&svc.Name, &svc.CredHash, &paths, &tiers, &svc.MaxTTLSeconds, &revoked, &svc.CreatedAt); err != nil {
+			return nil, err
+		}
+		if paths != "" {
+			svc.CeilingPaths = strings.Split(paths, ",")
+		}
+		if tiers != "" {
+			svc.Tiers = strings.Split(tiers, ",")
+		}
+		svc.Revoked = revoked == 1
+		out = append(out, svc)
+	}
+	return out, rows.Err()
 }
 
 // NormalizePath cleans a wiki path: no leading slash, no empty segments,
