@@ -28,10 +28,25 @@ and the mapping is:
 ## Status
 
 Milestone 3.1 (scaffold): schema, seed import, site rendering,
-page serving, receipt chain. `/edit` and `/v1/tokens` land in M3.2,
-`/mcp` + WebMCP execution in M3.3, the admin API in M3.4, the public
-deploy in M3.5. Until their milestones land, write surfaces answer
-`501`.
+page serving, receipt chain. **Milestone 3.2 (write lane): done** —
+WebCrypto JWT mint/verify (`src/token.ts`), the `/edit` lane with
+tiers + CAS + receipts, the `/v1/tokens` exchange with ceiling gates
+and the escalation queue, and deliver-once pickup
+(`src/lane.ts`). `/mcp` + WebMCP execution land in M3.3, the admin
+API in M3.4, the public deploy in M3.5; `/mcp` answers `501` until
+then.
+
+The lane needs `SIGNING_SECRET` (Worker secret; hex, the same format
+as the Go runtime's `signing.key` file). Unset, the lane fails
+closed.
+
+Owner operations that the Go runtime performs through its CLI
+(service add, token revoke, proposal accept, mint-request decide)
+are exposed until M3.4 as bootstrap routes under `/internal/`,
+gated by the same `ALLOW_SEED` switch:
+`register-service`, `revoke-token`, `accept-proposal`,
+`decide-mint-request`. The admin API replaces them; do not build on
+them.
 
 ## Develop
 

@@ -10,6 +10,14 @@ export default defineWorkersConfig({
         // share one instance and are written to be order-tolerant —
         // the same property the idempotent seed gives the real wiki.
         isolatedStorage: false,
+        miniflare: {
+          bindings: {
+            // Test-only signing secret (64 hex chars = the Go
+            // runtime's signing.key format). Never a real key.
+            SIGNING_SECRET: "abababababababababababababababababababababababababababababababab",
+            ALLOW_SEED: "true",
+          },
+        },
       },
     },
   },

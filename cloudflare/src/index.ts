@@ -4,8 +4,9 @@
 // and everything else routes to the single wiki Durable Object.
 //
 // Milestone 3.1 surface: page/index/webmcp.js reads, the gated seed
-// import, and receipts verification. /edit, /v1/tokens and /mcp
-// answer 501 until M3.2/M3.3 land them.
+// import, and receipts verification. M3.2 adds the write lane
+// (/edit, /v1/tokens), forwarded to the wiki object below. /mcp
+// answers 501 until M3.3 lands it.
 
 import { WikiDO, type Env } from "./wiki";
 
@@ -38,6 +39,13 @@ export default {
       return wikiStub(env).fetch(new Request(`https://do/${path}`, req));
     }
 
+    // The write lane (M3.2) runs inside the wiki Durable Object. This
+    // forward must precede the page-serving block below: GET
+    // /v1/tokens/{id} is the pickup endpoint, not a page view.
+    if (path === "edit" || path === "v1/tokens" || path.startsWith("v1/tokens/")) {
+      return wikiStub(env).fetch(req);
+    }
+
     if (req.method === "GET") {
       if (path === "" || path === "index.html") {
         const hit = await serveSiteObject(env, "site/index.html");
@@ -64,9 +72,9 @@ export default {
       return new Response("404 page not found\n", { status: 404 });
     }
 
-    if (path === "edit" || path === "mcp" || path.startsWith("v1/")) {
+    if (path === "mcp") {
       return new Response(
-        JSON.stringify({ error: "not implemented in milestone 3.1 (Cloudflare runtime scaffold)" }),
+        JSON.stringify({ error: "not implemented until milestone 3.3" }),
         { status: 501, headers: { "content-type": "application/json" } },
       );
     }

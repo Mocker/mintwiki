@@ -7,13 +7,17 @@
 // serializes its writers.
 //
 // Milestone 3.1 surface: schema init, seed import, site rebuild, and
-// on-demand page render for cache misses. The token lane lands in
-// M3.2, the agent surfaces in M3.3, the admin API in M3.4.
+// on-demand page render for cache misses. M3.2 adds the write lane
+// (/edit, the /v1/tokens exchange + pickup) plus the gated bootstrap
+// stand-ins for the Go CLI's owner operations. The agent surfaces
+// land in M3.3, the admin API in M3.4.
 
 import { DurableObject } from "cloudflare:workers";
 import { ReceiptLog } from "./receipts";
 import { normalizePath, NotFoundError, WikiStore } from "./store";
 import { renderIndex, renderPage, webmcpJS } from "./render";
+import { Lane } from "./lane";
+import { hashCredential } from "./token";
 
 export interface Env {
   WIKI: DurableObjectNamespace;
@@ -33,11 +37,15 @@ function json(status: number, body: unknown): Response {
 export class WikiDO extends DurableObject<Env> {
   private store: WikiStore;
   private receipts: ReceiptLog;
+  private lane: Lane;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.store = new WikiStore(ctx.storage.sql, env.BLOB);
     this.receipts = new ReceiptLog(ctx.storage.sql);
+    this.lane = new Lane(this.store, this.receipts, env.SIGNING_SECRET, async () => {
+      await this.rebuildSite();
+    });
     ctx.blockConcurrencyWhile(async () => {
       this.store.initSchema();
     });
@@ -102,6 +110,60 @@ export class WikiDO extends DurableObject<Env> {
   async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
     try {
+      // --- The write lane (M3.2): forwarded by the Worker as-is. ---
+      if (req.method === "POST" && url.pathname === "/edit") {
+        const r = await this.lane.handleEdit(req.headers.get("authorization"), await req.text());
+        return json(r.status, r.body);
+      }
+      if (req.method === "POST" && url.pathname === "/v1/tokens") {
+        const r = await this.lane.handleMint(req.headers.get("authorization"), await req.text());
+        return json(r.status, r.body);
+      }
+      if (req.method === "GET" && url.pathname.startsWith("/v1/tokens/")) {
+        const id = decodeURIComponent(url.pathname.slice("/v1/tokens/".length));
+        const r = await this.lane.handleMintPoll(req.headers.get("authorization"), id);
+        return json(r.status, r.body);
+      }
+      // --- Bootstrap surface (ALLOW_SEED-gated at the Worker). These
+      // are the pre-admin stand-ins for the Go CLI's direct-store
+      // owner operations — service add, revoke, accept, decide — and
+      // M3.4's admin API replaces them. ---
+      if (req.method === "POST" && url.pathname === "/internal/register-service") {
+        const body = (await req.json()) as {
+          name?: string;
+          credential?: string;
+          ceiling_paths?: string[];
+          tiers?: string[];
+          max_ttl_seconds?: number;
+        };
+        if (!body.name || !body.credential) return json(400, { error: "name and credential are required" });
+        this.store.registerService(
+          body.name,
+          await hashCredential(body.credential),
+          body.ceiling_paths ?? [],
+          body.tiers ?? ["allow"],
+          body.max_ttl_seconds ?? 1800,
+        );
+        return json(200, { status: "registered", service: body.name });
+      }
+      if (req.method === "POST" && url.pathname === "/internal/revoke-token") {
+        const body = (await req.json()) as { jti?: string };
+        if (!body.jti) return json(400, { error: "jti is required" });
+        this.store.revokeToken(body.jti);
+        return json(200, { status: "revoked", jti: body.jti });
+      }
+      if (req.method === "POST" && url.pathname === "/internal/accept-proposal") {
+        const body = (await req.json()) as { id?: string };
+        if (!body.id) return json(400, { error: "id is required" });
+        const r = await this.lane.acceptProposal(body.id);
+        return json(r.status, r.body);
+      }
+      if (req.method === "POST" && url.pathname === "/internal/decide-mint-request") {
+        const body = (await req.json()) as { id?: string; approve?: boolean };
+        if (!body.id) return json(400, { error: "id is required" });
+        const r = await this.lane.decideMintRequest(body.id, body.approve === true);
+        return json(r.status, r.body);
+      }
       if (req.method === "POST" && url.pathname === "/internal/seed-page") {
         const body = (await req.json()) as { path?: string; content?: string };
         if (!body.path || typeof body.content !== "string") {
