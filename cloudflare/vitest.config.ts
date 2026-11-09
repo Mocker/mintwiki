@@ -20,7 +20,8 @@ export default defineWorkersConfig({
             // Test-only signing secret (64 hex chars = the Go
             // runtime's signing.key format). Never a real key.
             SIGNING_SECRET: "abababababababababababababababababababababababababababababababab",
-            ALLOW_SEED: "true",
+            // Test-only admin token for the /v1/admin/* surface.
+            OWNER_ADMIN_TOKEN: "mintwiki-test-admin-token",
           },
         },
       },

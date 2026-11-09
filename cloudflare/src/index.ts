@@ -30,19 +30,20 @@ export default {
     const url = new URL(req.url);
     const path = url.pathname.replace(/^\//, "");
 
-    // Bootstrap operations (seed import, site rebuild, receipt
-    // verification). ALLOW_SEED gates them until M3.4 replaces this
-    // switch with the admin-token surface; the var's own comment in
-    // wrangler.jsonc says when it must be off.
+    // /internal/* is Worker↔DO plumbing (page render, index, site
+    // rebuild). The Worker reaches it through its own stub fetches;
+    // it is never forwarded from outside. The M3.1–M3.3 bootstrap
+    // routes that lived behind an ALLOW_SEED gate here are retired —
+    // owner operations are the admin surface below (M3.4).
     if (path.startsWith("internal/")) {
-      if (env.ALLOW_SEED !== "true") return new Response("not found", { status: 404 });
-      return wikiStub(env).fetch(new Request(`https://do/${path}`, req));
+      return new Response("not found", { status: 404 });
     }
 
-    // The write lane (M3.2) runs inside the wiki Durable Object. This
-    // forward must precede the page-serving block below: GET
-    // /v1/tokens/{id} is the pickup endpoint, not a page view.
-    if (path === "edit" || path === "v1/tokens" || path.startsWith("v1/tokens/")) {
+    // The write lane (M3.2) and the admin surface (M3.4) run inside
+    // the wiki Durable Object. This forward must precede the
+    // page-serving block below: GET /v1/tokens/{id} is the pickup
+    // endpoint, not a page view.
+    if (path === "edit" || path.startsWith("v1/")) {
       return wikiStub(env).fetch(req);
     }
 

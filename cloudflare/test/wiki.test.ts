@@ -7,10 +7,17 @@ import { describe, expect, it } from "vitest";
 // definitions. Runs against the real Worker + Durable Object + R2
 // bindings in the Workers test pool (miniflare).
 
+// Seeding goes through the admin surface (M3.4) — the bootstrap
+// /internal routes this file originally used are retired.
+const ADMIN_HEADERS = {
+  authorization: "Bearer mintwiki-test-admin-token",
+  "content-type": "application/json",
+};
+
 async function seed(path: string, content: string) {
-  return SELF.fetch("https://mw/internal/seed-page", {
+  return SELF.fetch("https://mw/v1/admin/seed-page", {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: ADMIN_HEADERS,
     body: JSON.stringify({ path, content }),
   });
 }
@@ -21,8 +28,8 @@ describe("mintwiki cloudflare runtime (M3.1)", () => {
 
     const first = await seed("home", md);
     expect(first.status).toBe(200);
-    const firstBody = (await first.json()) as { status: string; rev_id: string };
-    expect(firstBody.status).toBe("applied");
+    const firstBody = (await first.json()) as { outcome: string; rev_id: string };
+    expect(firstBody.outcome).toBe("applied");
     expect(firstBody.rev_id).toMatch(/^[0-9a-f]{64}$/);
 
     const page = await SELF.fetch("https://mw/home");
@@ -33,8 +40,8 @@ describe("mintwiki cloudflare runtime (M3.1)", () => {
     expect(html).toContain(`revision ${firstBody.rev_id} · version 1`);
 
     const again = await seed("home", md);
-    const againBody = (await again.json()) as { status: string };
-    expect(againBody.status).toBe("skipped");
+    const againBody = (await again.json()) as { outcome: string };
+    expect(againBody.outcome).toBe("skipped");
 
     const index = await SELF.fetch("https://mw/");
     expect(index.status).toBe(200);
@@ -57,7 +64,7 @@ describe("mintwiki cloudflare runtime (M3.1)", () => {
   });
 
   it("receipts chain verifies after seeding", async () => {
-    const res = await SELF.fetch("https://mw/internal/receipts-verify");
+    const res = await SELF.fetch("https://mw/v1/admin/receipts/verify", { headers: ADMIN_HEADERS });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { entries: number; ok: boolean };
     expect(body.ok).toBe(true);

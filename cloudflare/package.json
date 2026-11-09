@@ -16,7 +16,8 @@
   "scripts": {
     "deploy": "wrangler deploy",
     "dev": "wrangler dev",
-    "seed": "node scripts/seed.mjs",
+    "seed": "node scripts/admin.mjs seed",
+    "admin": "node scripts/admin.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

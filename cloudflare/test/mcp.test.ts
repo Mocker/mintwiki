@@ -7,7 +7,13 @@ import { describe, expect, it } from "vitest";
 // running the shared token lane (always a proposal, never a head
 // move). Mirrors the MCP scenarios in scripts/demo.sh.
 
-const CRED = "mwsvc_" + "44".repeat(32);
+// Owner operations go through the admin surface (M3.4); the
+// service credential is generated at registration and captured.
+const ADMIN_HEADERS = {
+  authorization: "Bearer mintwiki-test-admin-token",
+  "content-type": "application/json",
+};
+let CRED = "";
 
 async function rpc(body: unknown, auth?: string): Promise<{ status: number; body: any }> {
   const res = await SELF.fetch("https://mw/mcp", {
@@ -37,9 +43,9 @@ async function callTool(name: string, args: Record<string, unknown>, auth?: stri
 }
 
 async function seed(path: string, content: string) {
-  const res = await SELF.fetch("https://mw/internal/seed-page", {
+  const res = await SELF.fetch("https://mw/v1/admin/seed-page", {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: ADMIN_HEADERS,
     body: JSON.stringify({ path, content }),
   });
   expect(res.status).toBe(200);
@@ -123,17 +129,18 @@ describe("mintwiki MCP surface (M3.3)", () => {
 
     // With a token (any tier — the tool always proposes): lands as a
     // proposal, head unmoved, acceptable by the owner.
-    await SELF.fetch("https://mw/internal/register-service", {
+    const regRes = await SELF.fetch("https://mw/v1/admin/services", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: ADMIN_HEADERS,
       body: JSON.stringify({
         name: "mcp-agent",
-        credential: CRED,
         ceiling_paths: ["/mcp/**"],
         tiers: ["allow"],
         max_ttl_seconds: 1800,
       }),
     });
+    expect(regRes.status).toBe(201);
+    CRED = ((await regRes.json()) as { credential: string }).credential;
     const exRes = await SELF.fetch("https://mw/v1/tokens", {
       method: "POST",
       headers: { authorization: `Bearer ${CRED}`, "content-type": "application/json" },
@@ -152,9 +159,9 @@ describe("mintwiki MCP surface (M3.3)", () => {
     const stillV1 = await callTool("get_page", { path: "mcp/target" });
     expect(stillV1.json.version).toBe(1);
 
-    const accept = await SELF.fetch("https://mw/internal/accept-proposal", {
+    const accept = await SELF.fetch("https://mw/v1/admin/proposals/accept", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: ADMIN_HEADERS,
       body: JSON.stringify({ id: proposed.json.proposal_id }),
     });
     expect(accept.status).toBe(200);
@@ -171,7 +178,7 @@ describe("mintwiki MCP surface (M3.3)", () => {
     expect(stale.isError).toBe(true);
     expect(stale.text).toContain("head moved since the edit was based on it");
 
-    const verify = await SELF.fetch("https://mw/internal/receipts-verify");
+    const verify = await SELF.fetch("https://mw/v1/admin/receipts/verify", { headers: ADMIN_HEADERS });
     const vbody = (await verify.json()) as { ok: boolean };
     expect(vbody.ok).toBe(true);
   });

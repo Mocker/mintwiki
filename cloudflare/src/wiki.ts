@@ -8,23 +8,23 @@
 //
 // Milestone 3.1 surface: schema init, seed import, site rebuild, and
 // on-demand page render for cache misses. M3.2 adds the write lane
-// (/edit, the /v1/tokens exchange + pickup) plus the gated bootstrap
-// stand-ins for the Go CLI's owner operations. The agent surfaces
-// land in M3.3, the admin API in M3.4.
+// (/edit, the /v1/tokens exchange + pickup), M3.3 the agent surfaces
+// (/mcp + tools), M3.4 the admin surface (/v1/admin/*) — which
+// retired the ALLOW_SEED bootstrap routes entirely.
 
 import { DurableObject } from "cloudflare:workers";
 import { ReceiptLog } from "./receipts";
 import { normalizePath, NotFoundError, WikiStore } from "./store";
 import { renderIndex, renderPage, webmcpJS } from "./render";
 import { Lane } from "./lane";
-import { hashCredential, scopeString } from "./token";
+import { scopeString } from "./token";
 import { Executor } from "./tools";
 import { handleMCP } from "./mcp";
+import { handleAdmin } from "./admin";
 
 export interface Env {
   WIKI: DurableObjectNamespace;
   BLOB: R2Bucket;
-  ALLOW_SEED?: string;
   SIGNING_SECRET?: string;
   OWNER_ADMIN_TOKEN?: string;
 }
@@ -76,18 +76,17 @@ export class WikiDO extends DurableObject<Env> {
     return paths.length;
   }
 
-  // seedPage is cmdSeed's per-file step (Go): a page that already
-  // exists is skipped (seed is idempotent); a new page is applied at
-  // base version 0 with author "seed" and receipted, exactly like the
-  // Go seed command.
-  private async seedPage(pathRaw: string, content: string): Promise<Response> {
-    let path: string;
-    try {
-      path = normalizePath(pathRaw);
-    } catch (e) {
-      return json(400, { error: (e as Error).message });
-    }
-    if (await this.store.pageExists(path)) return json(200, { status: "skipped", path });
+  // applySeedPage is cmdSeed's per-file step (Go): a page that
+  // already exists is skipped (seed is idempotent); a new page is
+  // applied at base version 0 with author "seed" and receipted,
+  // exactly like the Go seed command. Reached through the admin
+  // surface (M3.4).
+  private async applySeedPage(
+    pathRaw: string,
+    content: string,
+  ): Promise<{ outcome: "applied" | "skipped"; revID?: string; version?: number }> {
+    const path = normalizePath(pathRaw);
+    if (await this.store.pageExists(path)) return { outcome: "skipped" };
     const { revID, newVersion } = await this.store.putPage(
       path,
       new TextEncoder().encode(content),
@@ -106,7 +105,7 @@ export class WikiDO extends DurableObject<Env> {
       after_version: newVersion,
     });
     await this.rebuildSite();
-    return json(200, { status: "applied", path, rev_id: revID, version: newVersion });
+    return { outcome: "applied", revID, version: newVersion };
   }
 
   async fetch(req: Request): Promise<Response> {
@@ -158,53 +157,29 @@ export class WikiDO extends DurableObject<Env> {
           headers: { "content-type": "application/json" },
         });
       }
-      // --- Bootstrap surface (ALLOW_SEED-gated at the Worker). These
-      // are the pre-admin stand-ins for the Go CLI's direct-store
-      // owner operations — service add, revoke, accept, decide — and
-      // M3.4's admin API replaces them. ---
-      if (req.method === "POST" && url.pathname === "/internal/register-service") {
-        const body = (await req.json()) as {
-          name?: string;
-          credential?: string;
-          ceiling_paths?: string[];
-          tiers?: string[];
-          max_ttl_seconds?: number;
-        };
-        if (!body.name || !body.credential) return json(400, { error: "name and credential are required" });
-        this.store.registerService(
-          body.name,
-          await hashCredential(body.credential),
-          body.ceiling_paths ?? [],
-          body.tiers ?? ["allow"],
-          body.max_ttl_seconds ?? 1800,
+      // --- Admin surface (M3.4): the owner operations, gated by the
+      // OWNER_ADMIN_TOKEN secret inside handleAdmin. This replaces
+      // the M3.1–M3.3 ALLOW_SEED bootstrap routes, which are gone. ---
+      if (url.pathname === "/v1/admin" || url.pathname.startsWith("/v1/admin/")) {
+        const r = await handleAdmin(
+          {
+            store: this.store,
+            receipts: this.receipts,
+            lane: this.lane,
+            signingSecretHex: this.env.SIGNING_SECRET,
+            adminToken: this.env.OWNER_ADMIN_TOKEN,
+            seedPage: (p, c) => this.applySeedPage(p, c),
+          },
+          req.method,
+          url.pathname.slice("/v1/admin".length) || "/",
+          url.searchParams,
+          req.headers.get("authorization"),
+          req.method === "POST" ? await req.text() : "",
         );
-        return json(200, { status: "registered", service: body.name });
-      }
-      if (req.method === "POST" && url.pathname === "/internal/revoke-token") {
-        const body = (await req.json()) as { jti?: string };
-        if (!body.jti) return json(400, { error: "jti is required" });
-        this.store.revokeToken(body.jti);
-        return json(200, { status: "revoked", jti: body.jti });
-      }
-      if (req.method === "POST" && url.pathname === "/internal/accept-proposal") {
-        const body = (await req.json()) as { id?: string };
-        if (!body.id) return json(400, { error: "id is required" });
-        const r = await this.lane.acceptProposal(body.id);
         return json(r.status, r.body);
       }
-      if (req.method === "POST" && url.pathname === "/internal/decide-mint-request") {
-        const body = (await req.json()) as { id?: string; approve?: boolean };
-        if (!body.id) return json(400, { error: "id is required" });
-        const r = await this.lane.decideMintRequest(body.id, body.approve === true);
-        return json(r.status, r.body);
-      }
-      if (req.method === "POST" && url.pathname === "/internal/seed-page") {
-        const body = (await req.json()) as { path?: string; content?: string };
-        if (!body.path || typeof body.content !== "string") {
-          return json(400, { error: "path and content are required" });
-        }
-        return await this.seedPage(body.path, body.content);
-      }
+      // --- Worker↔DO plumbing below: reachable only through the
+      // Worker's own stub fetches, never forwarded from outside. ---
       if (req.method === "POST" && url.pathname === "/internal/rebuild") {
         const pages = await this.rebuildSite();
         return json(200, { pages });
@@ -225,10 +200,6 @@ export class WikiDO extends DurableObject<Env> {
         return new Response(renderIndex(this.store.listPages()), {
           headers: { "content-type": "text/html; charset=utf-8" },
         });
-      }
-      if (req.method === "GET" && url.pathname === "/internal/receipts-verify") {
-        const entries = await this.receipts.verify();
-        return json(200, { entries, ok: true });
       }
       return json(404, { error: "not found" });
     } catch (e) {
