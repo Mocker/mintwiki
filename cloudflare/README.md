@@ -92,14 +92,28 @@ Seeding (and every other owner operation) needs the admin token:
 for local dev, put `OWNER_ADMIN_TOKEN` in `.dev.vars` (gitignored)
 and export the same value as `MINTWIKI_ADMIN_TOKEN` for the client.
 
-## Deploy (M3.5, Ryan's steps included)
+## Deploy (M3.5)
+
+**Deployed 2026-11-09:** https://mintwiki.sokercap.workers.dev
+(R2 bucket `mintwiki-blobs`; the `mintwiki.gup.io` custom domain
+attaches in the dashboard as the final step — see the Ryan steps
+sheet in the project records).
+
+Redeploy:
 
 ```sh
-npx wrangler r2 bucket create mintwiki-blobs
-npx wrangler secret put SIGNING_SECRET       # Ryan only — never in code
-npx wrangler secret put OWNER_ADMIN_TOKEN    # Ryan only
 npx wrangler deploy
 ```
 
-The `mintwiki.gup.io` custom domain is attached in the Cloudflare
-dashboard.
+First-time setup order matters:
+
+1. `npx wrangler r2 bucket create mintwiki-blobs`
+2. `npx wrangler deploy`
+3. Set the two secrets (**owner's hands only** — dashboard →
+   Workers & Pages → mintwiki → Settings → Variables and Secrets,
+   or `wrangler secret put`): `SIGNING_SECRET` (64 hex chars) and
+   `OWNER_ADMIN_TOKEN`. Until they are set, the write lane and the
+   admin surface fail closed by design (the admin surface answers
+   `503 admin is not configured`).
+4. Seed with the admin client (needs `MINTWIKI_ADMIN_TOKEN`):
+   `npm run seed`.

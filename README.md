@@ -109,7 +109,7 @@ Seeding is also a standalone owner command — `mintwiki seed --data DIR --dir d
 
 No Docker? The binary is the deployment: `go build`, `mintwiki init`, `mintwiki seed`, `mintwiki serve`. Backup and migration are copying the data directory.
 
-A second, Cloudflare-native runtime lives in [`cloudflare/`](cloudflare/README.md) (Milestone 3, in progress): a Worker front door, one SQLite-backed Durable Object per wiki, and R2 for revisions and the rendered site — the same contract, held to the Go runtime by the black-box suite in [`conformance/`](conformance/README.md) and the canonical [`tools.definitions.json`](tools.definitions.json). The Go binary stays the reference implementation and the self-hosting story; the Cloudflare runtime is an alternative deployable, not a fork.
+A second, Cloudflare-native runtime lives in [`cloudflare/`](cloudflare/README.md) (Milestone 3): a Worker front door, one SQLite-backed Durable Object per wiki, and R2 for revisions and the rendered site — the same contract, held to the Go runtime by the black-box suite in [`conformance/`](conformance/README.md) and the canonical [`tools.definitions.json`](tools.definitions.json). The Go binary stays the reference implementation and the self-hosting story; the Cloudflare runtime is an alternative deployable, not a fork. **Live demo: https://mintwiki.sokercap.workers.dev** (moving to `mintwiki.gup.io`).
 
 ## Acceptance demo
 
