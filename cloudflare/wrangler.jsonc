@@ -12,13 +12,8 @@
     "bindings": [{ "name": "WIKI", "class_name": "WikiDO" }]
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["WikiDO"] }],
-  "r2_buckets": [{ "binding": "BLOB", "bucket_name": "mintwiki-blobs" }],
-  "vars": {
-    // Gates the unauthenticated seed import endpoint (POST
-    // /internal/seed-page). Milestone 3.4 replaces it with the
-    // admin-token surface; until then it exists so a fresh demo can be
-    // seeded, and it must be set to "false" (or removed) on any wiki
-    // whose contents matter.
-    "ALLOW_SEED": "true"
-  }
+  "r2_buckets": [{ "binding": "BLOB", "bucket_name": "mintwiki-blobs" }]
+  // No vars: owner operations are the /v1/admin/* surface (M3.4),
+  // gated by the OWNER_ADMIN_TOKEN secret. The old ALLOW_SEED switch
+  // and its bootstrap routes are retired.
 }

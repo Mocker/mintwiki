@@ -446,6 +446,80 @@ export class WikiStore {
     }));
   }
 
+  // --- Owner listings (M3.4, for the admin surface) ---
+
+  // listServices mirrors store.ListServices (Go), ORDER BY name. The
+  // credential hash is never selected: the admin surface has no
+  // reason to carry it.
+  listServices(): Omit<Service, "credHash">[] {
+    const rows = this.sql
+      .exec(
+        `SELECT name, ceiling_paths, tiers, max_ttl_seconds, revoked, created_at
+         FROM services ORDER BY name`,
+      )
+      .toArray() as unknown as ServiceRow[];
+    return rows.map((r) => ({
+      name: r.name,
+      ceilingPaths: r.ceiling_paths === "" ? [] : r.ceiling_paths.split(","),
+      tiers: r.tiers === "" ? [] : r.tiers.split(","),
+      maxTTLSeconds: r.max_ttl_seconds,
+      revoked: r.revoked === 1,
+      createdAt: r.created_at,
+    }));
+  }
+
+  // revokeService mirrors store.RevokeService (Go); reports whether
+  // a row matched so the API can 404 an unknown name (the Go CLI's
+  // UPDATE is silent either way; the API chooses to say so).
+  revokeService(name: string): boolean {
+    const cur = this.sql.exec(`UPDATE services SET revoked = 1 WHERE name = ?`, name);
+    return cur.rowsWritten > 0;
+  }
+
+  // listMintRequests mirrors store.ListMintRequests (Go): optional
+  // status filter, oldest first.
+  listMintRequests(status = ""): MintRequest[] {
+    const rows = (
+      status
+        ? this.sql.exec(
+            `SELECT id, service, tool, paths, tier, ttl_seconds, status, created_at, decided_at
+             FROM mint_requests WHERE status = ? ORDER BY created_at`,
+            status,
+          )
+        : this.sql.exec(
+            `SELECT id, service, tool, paths, tier, ttl_seconds, status, created_at, decided_at
+             FROM mint_requests ORDER BY created_at`,
+          )
+    ).toArray() as unknown as MintRequestRow[];
+    return rows.map(scanMintRequest);
+  }
+
+  // listProposals mirrors store.ListProposals (Go): optional status
+  // filter, oldest first, without loading revision content.
+  listProposals(status = ""): Omit<Proposal, "content">[] {
+    const rows = (
+      status
+        ? this.sql.exec(
+            `SELECT id, page_path, rev_id, base_version, status, token_jti, created_at
+             FROM proposals WHERE status = ? ORDER BY created_at`,
+            status,
+          )
+        : this.sql.exec(
+            `SELECT id, page_path, rev_id, base_version, status, token_jti, created_at
+             FROM proposals ORDER BY created_at`,
+          )
+    ).toArray() as unknown as ProposalRow[];
+    return rows.map((r) => ({
+      id: r.id,
+      pagePath: r.page_path,
+      revID: r.rev_id,
+      baseVersion: r.base_version,
+      status: r.status,
+      tokenJTI: r.token_jti,
+      createdAt: r.created_at,
+    }));
+  }
+
   // --- Policy ---
 
   // Policy lives in the meta table; absent rows yield the Go defaults

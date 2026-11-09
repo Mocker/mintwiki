@@ -425,8 +425,7 @@ export class Lane {
 
   // acceptProposal is the owner's accept, mirroring cmdAccept (Go):
   // apply the stored revision at its base version, mark accepted, and
-  // receipt it as the owner. Until M3.4 it is reachable only through
-  // the gated bootstrap route; then through the admin API.
+  // receipt it as the owner. Reached through the admin API (M3.4).
   async acceptProposal(id: string): Promise<LaneResult> {
     let p;
     try {
