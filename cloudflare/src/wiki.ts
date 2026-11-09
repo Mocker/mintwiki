@@ -17,7 +17,9 @@ import { ReceiptLog } from "./receipts";
 import { normalizePath, NotFoundError, WikiStore } from "./store";
 import { renderIndex, renderPage, webmcpJS } from "./render";
 import { Lane } from "./lane";
-import { hashCredential } from "./token";
+import { hashCredential, scopeString } from "./token";
+import { Executor } from "./tools";
+import { handleMCP } from "./mcp";
 
 export interface Env {
   WIKI: DurableObjectNamespace;
@@ -123,6 +125,38 @@ export class WikiDO extends DurableObject<Env> {
         const id = decodeURIComponent(url.pathname.slice("/v1/tokens/".length));
         const r = await this.lane.handleMintPoll(req.headers.get("authorization"), id);
         return json(r.status, r.body);
+      }
+      if (req.method === "POST" && url.pathname === "/mcp") {
+        // The agent surface (M3.3): reads are token-free; propose_edit
+        // runs the shared lane (the M3.2 injection, mirroring the Go
+        // server's mcpPropose — auth failures are receipted as
+        // rejections, like /edit rejections).
+        const executor = new Executor(this.store, async (preq, auth) => {
+          const { claims, reason } = await this.lane.verifyForPropose(auth || null, preq.path);
+          if (reason !== "" || !claims) {
+            const cur = this.store.headVersion(preq.path);
+            await this.receipts.append({
+              actor: claims?.actor ?? "",
+              token_jti: claims?.jti ?? "",
+              scope: claims ? scopeString(claims) : "",
+              page: preq.path,
+              result: "rejected",
+              reason,
+              before_version: cur,
+              after_version: cur,
+            });
+            throw new Error(reason);
+          }
+          const p = await this.lane.proposeWithClaims(claims, preq.path, preq.content, preq.expectedVersion);
+          if (p.reason !== "") throw new Error(p.reason);
+          return p.proposalID;
+        });
+        const out = await handleMCP(executor, await req.text(), req.headers.get("authorization"));
+        if (out.body === null) return new Response(null, { status: out.status });
+        return new Response(out.body, {
+          status: out.status,
+          headers: { "content-type": "application/json" },
+        });
       }
       // --- Bootstrap surface (ALLOW_SEED-gated at the Worker). These
       // are the pre-admin stand-ins for the Go CLI's direct-store

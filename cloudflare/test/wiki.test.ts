@@ -38,7 +38,13 @@ describe("mintwiki cloudflare runtime (M3.1)", () => {
 
     const index = await SELF.fetch("https://mw/");
     expect(index.status).toBe(200);
-    expect(await index.text()).toContain('<a href="/home">home</a>');
+    // Not asserting the full page list here: test files share one R2
+    // bucket (miniflare) while each file's Durable Object is its own
+    // instance, so another file's rebuild can legitimately overwrite
+    // site/index.html between this file's seed and this fetch. The
+    // index's exact contents are asserted by the conformance suite
+    // against a standalone runtime, where one wiki owns the bucket.
+    expect(await index.text()).toContain("<h1>MintWiki</h1>");
 
     const js = await SELF.fetch("https://mw/webmcp.js");
     expect(js.status).toBe(200);
@@ -58,8 +64,15 @@ describe("mintwiki cloudflare runtime (M3.1)", () => {
     expect(body.entries).toBeGreaterThanOrEqual(1);
   });
 
-  it("the MCP surface answers 501 until M3.3 lands it", async () => {
-    const res = await SELF.fetch("https://mw/mcp", { method: "POST", body: "{}" });
-    expect(res.status).toBe(501);
+  it("GET /mcp is refused; a notification is accepted silently", async () => {
+    const get = await SELF.fetch("https://mw/mcp");
+    expect(get.status).toBe(405);
+    const note = await SELF.fetch("https://mw/mcp", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
+    });
+    expect(note.status).toBe(202);
+    expect(await note.text()).toBe("");
   });
 });

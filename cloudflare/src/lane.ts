@@ -62,7 +62,7 @@ export class Lane {
     path: string,
   ): Promise<{ claims: Claims | null; code: number; reason: string }> {
     if (!auth || !auth.startsWith("Bearer ")) {
-      return { claims: null, code: 401, reason: "missing bearer <redacted>" };
+      return { claims: null, code: 401, reason: "missing bearer token" };
     }
     let claims: Claims;
     try {

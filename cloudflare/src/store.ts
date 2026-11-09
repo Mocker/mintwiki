@@ -422,6 +422,30 @@ export class WikiStore {
     this.sql.exec("UPDATE mint_requests SET status = ? WHERE id = ?", status, id);
   }
 
+  // --- Recent changes (M3.3, for the recent_changes tool) ---
+
+  // recentChanges mirrors store.RecentChanges (Go): newest first by
+  // creation time, rowid breaking ties — the revisions table is a
+  // rowid table here just as in the Go SQLite store.
+  recentChanges(limit: number): Revision[] {
+    if (limit <= 0) limit = 20;
+    const rows = this.sql
+      .exec(
+        `SELECT rev_id, page_path, parent_rev, author, token_jti, created_at
+         FROM revisions ORDER BY created_at DESC, rowid DESC LIMIT ?`,
+        limit,
+      )
+      .toArray() as unknown as RevisionRow[];
+    return rows.map((r) => ({
+      revID: r.rev_id,
+      pagePath: r.page_path,
+      parentRev: r.parent_rev,
+      author: r.author,
+      tokenJTI: r.token_jti,
+      createdAt: r.created_at,
+    }));
+  }
+
   // --- Policy ---
 
   // Policy lives in the meta table; absent rows yield the Go defaults
@@ -447,6 +471,24 @@ export class WikiStore {
     if (ttlSeconds > this.getPolicy().maxTTLSeconds) return "ttl exceeds policy maximum";
     return null;
   }
+}
+
+interface RevisionRow {
+  rev_id: string;
+  page_path: string;
+  parent_rev: string;
+  author: string;
+  token_jti: string;
+  created_at: string;
+}
+
+export interface Revision {
+  revID: string;
+  pagePath: string;
+  parentRev: string;
+  author: string;
+  tokenJTI: string;
+  createdAt: string;
 }
 
 interface ProposalRow {

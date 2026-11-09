@@ -5,8 +5,8 @@
 //
 // Milestone 3.1 surface: page/index/webmcp.js reads, the gated seed
 // import, and receipts verification. M3.2 adds the write lane
-// (/edit, /v1/tokens), forwarded to the wiki object below. /mcp
-// answers 501 until M3.3 lands it.
+// (/edit, /v1/tokens), M3.3 the agent surface (/mcp) — both forwarded
+// to the wiki object below.
 
 import { WikiDO, type Env } from "./wiki";
 
@@ -46,6 +46,18 @@ export default {
       return wikiStub(env).fetch(req);
     }
 
+    // The agent surface (M3.3) also runs inside the wiki object;
+    // GET /mcp is refused exactly as the Go server refuses it. This
+    // branch must also precede page serving ("mcp" is a valid page
+    // path shape, but it is not a page).
+    if (path === "mcp") {
+      if (req.method === "POST") return wikiStub(env).fetch(req);
+      return new Response("MCP endpoint accepts POST only", {
+        status: 405,
+        headers: { allow: "POST" },
+      });
+    }
+
     if (req.method === "GET") {
       if (path === "" || path === "index.html") {
         const hit = await serveSiteObject(env, "site/index.html");
@@ -72,12 +84,6 @@ export default {
       return new Response("404 page not found\n", { status: 404 });
     }
 
-    if (path === "mcp") {
-      return new Response(
-        JSON.stringify({ error: "not implemented until milestone 3.3" }),
-        { status: 501, headers: { "content-type": "application/json" } },
-      );
-    }
     return new Response("404 page not found\n", { status: 404 });
   },
 } satisfies ExportedHandler<Env>;

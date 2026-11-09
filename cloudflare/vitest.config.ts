@@ -2,6 +2,11 @@ import { defineWorkersConfig } from "@cloudflare/vitest-pool-workers/config";
 
 export default defineWorkersConfig({
   test: {
+    // The suites exercise ONE shared wiki instance (isolatedStorage
+    // is off, below) — three scenario scripts against a single wiki,
+    // like the real thing. Running files in parallel would race the
+    // shared page index, so they run sequentially.
+    fileParallelism: false,
     poolOptions: {
       workers: {
         wrangler: { configPath: "./wrangler.jsonc" },
